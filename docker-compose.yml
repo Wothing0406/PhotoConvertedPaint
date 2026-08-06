@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  tranhve-app:
+    build: .
+    container_name: tranhve-container
+    ports:
+      - "7860:7860"
+    volumes:
+      - ./output:/app/output
+      # Mount cache directory for rembg models so it doesn't download it every time container is recreated
+      - rembg-models:/root/.u2net
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
+
+volumes:
+  rembg-models:

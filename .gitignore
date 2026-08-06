@@ -1,0 +1,18 @@
+﻿# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Caches and temporary files
+.env
+.idea/
+.vscode/
+.gemini/
+output/
+test_images/
+*.zip
+*.mp4
+*.png
+*.jpg
+venv/
+.agents/

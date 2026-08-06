@@ -1,0 +1,13 @@
+opencv-python-headless
+pillow
+rembg
+requests
+fastapi
+uvicorn
+python-multipart
+google-genai
+python-dotenv
+numpy
+onnxruntime-gpu
+cupy-cuda12x
+numba

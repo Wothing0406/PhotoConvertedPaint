@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TranhVe - Smart Portrait-to-Sketch Engine</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <header class="header">
+        <h1 class="logo">TranhVe</h1>
+        <p class="subtitle">Chuyển đổi ảnh chụp sang nét vẽ tay và tranh số hóa thông minh</p>
+    </header>
+
+    <main class="main-container">
+        <!-- Cột 1: Cấu hình vẽ -->
+        <section class="panel sidebar-panel">
+            <h2>Cấu Hình Nét Vẽ</h2>
+            
+            <!-- Khu vực upload ảnh kéo thả -->
+            <div class="upload-zone" id="upload-zone">
+                <input type="file" id="file-input" accept="image/*" style="display: none;">
+                <div class="upload-placeholder" id="upload-placeholder">
+                    <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/>
+                    </svg>
+                    <p class="upload-text">Kéo thả ảnh hoặc <span>Nhấp để tải lên</span></p>
+                </div>
+                <img id="image-preview" class="image-preview" style="display: none;" alt="Preview">
+            </div>
+
+            <!-- Phong cách vẽ -->
+            <div class="control-group">
+                <label for="vibe-mode">Phong Cách Nét Vẽ (Vibe)</label>
+                <select id="vibe-mode">
+                    <option value="Realistic Sketch">Tả thực (Realistic Sketch)</option>
+                    <option value="Anime Outline">Nét vẽ Anime (Anime Outline)</option>
+                    <option value="Colored Pencil Sketch">Tranh nét chì màu (Colored Pencil)</option>
+                    <option value="Oil Painting">Tranh sơn dầu (Oil Painting) 🎨</option>
+                    <option value="Paint-by-Numbers Blueprint">Tranh số hóa tự tô (Paint-by-Numbers)</option>
+                </select>
+            </div>
+
+
+            <!-- Các tùy chọn Checkbox -->
+            <div class="checkbox-group">
+                <label class="checkbox-container">
+                    <input type="checkbox" id="remove-bg">
+                    <span class="checkmark"></span>
+                    Tự động xóa nền bằng AI local (rembg)
+                </label>
+
+                <label class="checkbox-container" id="gemini-tune-container">
+                    <input type="checkbox" id="gemini-tune">
+                    <span class="checkmark"></span>
+                    🤖 Tinh chỉnh thông số bằng Gemini API (tùy chọn, có thể bị giới hạn)
+                </label>
+            </div>
+
+
+            <!-- Cài đặt thuật toán nâng cao -->
+            <details class="advanced-settings">
+                <summary>Tùy chỉnh thuật toán nâng cao</summary>
+                <div class="settings-content">
+                    <div class="control-group">
+                        <label for="blur-slider">Độ mịn nét vẽ (Gaussian Blur): <span id="blur-val">5</span></label>
+                        <input type="range" id="blur-slider" min="1" max="21" step="2" value="5">
+                    </div>
+                    <div class="control-group">
+                        <label for="block-slider">Độ đậm nét (Block Size): <span id="block-val">11</span></label>
+                        <input type="range" id="block-slider" min="3" max="51" step="2" value="11">
+                    </div>
+                    <div class="control-group">
+                        <label for="c-slider">Độ nhạy biên nét (C constant): <span id="c-val">5</span></label>
+                        <input type="range" id="c-slider" min="1" max="20" step="1" value="5">
+                    </div>
+                    <div class="control-group">
+                        <label for="jitter-slider">Độ rung tay vẽ (Jitter): <span id="jitter-val">0.5</span></label>
+                        <input type="range" id="jitter-slider" min="0.0" max="2.0" step="0.1" value="0.5">
+                    </div>
+                    <div class="control-group">
+                        <label for="hatching-slider">Độ đánh bóng tối (Hatching - chỉ Realistic Sketch): <span id="hatching-val">0</span></label>
+                        <input type="range" id="hatching-slider" min="0.0" max="1.0" step="0.1" value="0">
+                    </div>
+                    <div class="control-group">
+                        <label for="speed-slider">Tốc độ vẽ (Nét/khung hình - thấp = chi tiết hơn): <span id="speed-val">8</span></label>
+                        <input type="range" id="speed-slider" min="2" max="80" step="2" value="8">
+                    </div>
+                </div>
+            </details>
+
+            <button id="draw-btn" class="btn primary-btn">Bắt Đầu Vẽ Động</button>
+        </section>
+
+        <!-- Cột 2: Bảng vẽ chính -->
+        <section class="panel main-panel">
+            <h2>Quá Trình Vẽ Nét (Progressive Drawing)</h2>
+            
+            <!-- Trạng thái gợi ý Gemini -->
+            <div class="status-box" id="status-box">
+                Gợi ý từ Gemini và trạng thái hệ thống sẽ hiện ở đây.
+            </div>
+
+            <!-- Canvas vẽ tranh -->
+            <div class="canvas-container" id="canvas-container">
+                <img id="drawing-canvas" class="drawing-canvas" src="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='100' height='100'><rect width='100' fill='%2318181b' height='100'/></svg>" alt="Bảng vẽ">
+                <button id="fullscreen-btn" class="fullscreen-btn" title="Xem toàn màn hình">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width: 20px; height: 20px;">
+                        <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>
+                    </svg>
+                </button>
+            </div>
+
+
+            <!-- Nút điều khiển kết quả -->
+            <div class="download-container" style="gap: 12px; flex-wrap: wrap;">
+                <button id="replay-btn" class="btn secondary-btn disabled" style="flex: 1; min-width: 140px;">Xem Lại Quá Trình</button>
+                <button id="quality-btn" class="btn secondary-btn disabled" style="flex: 1; min-width: 160px;">🔍 Kiểm Tra Chất Lượng</button>
+                <a id="download-btn" class="btn primary-btn disabled" style="flex: 1.5; min-width: 180px; text-align: center;" href="#" download="tranhve_package.zip">Tải Về Trọn Bộ (ZIP)</a>
+            </div>
+
+
+        </section>
+    </main>
+
+    <footer class="footer">
+        <p>Làm bởi Nguyễn Duy Quang &copy; 2026. Thiết kế giao diện nghệ thuật phẳng cao cấp.</p>
+    </footer>
+
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

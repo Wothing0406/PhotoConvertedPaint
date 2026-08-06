@@ -1,0 +1,173 @@
+"""
+modes/pencil.py — Colored Pencil Sketch
+========================================
+GPU Acceleration via src.gpu_utils (CuPy → CPU fallback):
+  - Per-channel pencil dodge  → gpu_pencil_dodge_channel (GPU × 3 channels)
+  - Multiply blend            → gpu_multiply             (GPU)
+  - Gaussian blur             → gpu_gaussian_blur        (GPU)
+  - Canny edge paths          → gpu_canny                (blur GPU, Canny CPU)
+"""
+
+import cv2
+import numpy as np
+import random
+from PIL import Image, ImageDraw, ImageFilter
+
+from src.gpu_utils import (
+    gpu_gaussian_blur,
+    gpu_pencil_dodge_channel,
+    gpu_multiply,
+    gpu_canny,
+    GPU_AVAILABLE,
+)
+
+
+def _jitter(pts, amount: float):
+    result, dx, dy = [], 0.0, 0.0
+    for x, y in pts:
+        dx = 0.82 * dx + 0.18 * random.gauss(0, amount * 1.5)
+        dy = 0.82 * dy + 0.18 * random.gauss(0, amount * 1.5)
+        result.append((x + dx, y + dy))
+    return result
+
+
+def _hatch_shadow(gray, spacing: int, dark_thresh: int, angle: int):
+    h, w = gray.shape
+    lines = []
+    for offset in range(-w, h, spacing):
+        current, in_dark = [], False
+        for x in range(w):
+            y = x + offset
+            if 0 <= y < h:
+                if gray[y, x] < dark_thresh:
+                    if not in_dark:
+                        in_dark = True
+                        current = [(x, y)]
+                    else:
+                        current.append((x, y))
+                else:
+                    if in_dark and len(current) > 5:
+                        lines.append(current)
+                    in_dark = False
+                    current = []
+            else:
+                if in_dark and len(current) > 5:
+                    lines.append(current)
+                in_dark = False
+                current = []
+        if in_dark and len(current) > 5:
+            lines.append(current)
+    return lines
+
+
+def _combined_paths(gray, blur, clo, chi, block, c_val, eps=0.0004):
+    b = max(3, blur | 1)
+    # GPU-accelerated blur, then CPU Canny + AdaptiveThreshold
+    blurred = gpu_gaussian_blur(gray, b)
+    edges   = cv2.Canny(blurred, clo, chi)
+    bk = max(3, block | 1)
+    thresh = cv2.adaptiveThreshold(
+        blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY_INV, bk, c_val + 2
+    )
+    combined = cv2.bitwise_or(edges, thresh)
+    cnts, _ = cv2.findContours(combined, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    paths = []
+    for cnt in cnts:
+        p = cv2.arcLength(cnt, False)
+        if p < 3:
+            continue
+        approx = cv2.approxPolyDP(cnt, max(0.04, eps * p), False)
+        if len(approx) > 1:
+            paths.append([tuple(pt[0]) for pt in approx])
+    return paths
+
+
+def draw(
+    pil_img: Image.Image,
+    *,
+    blur_size: int = 3,
+    threshold_block: int = 11,
+    threshold_c: int = 4,
+    jitter: float = 0.35,
+    bg_color_wash: bool = True,
+    wash_opacity: int = 75,
+    sketch_opacity: float = 0.13,
+    batch_size: int = 10,
+    **_kw,
+):
+    w, h = pil_img.size
+    img_np = np.array(pil_img.convert("RGB"))
+    gray   = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+
+    # ── Layer 1: Colour wash underpainting ───────────────────────────────────
+    canvas = Image.new("RGBA", (w, h), (255, 252, 244, 255))
+
+    blur_r = max(14, min(w, h) // 8)
+    washed_pil  = pil_img.convert("RGB").filter(ImageFilter.GaussianBlur(radius=blur_r))
+    washed_rgba = washed_pil.convert("RGBA")
+    washed_pil.close()
+
+    opacity = min(220, max(60, wash_opacity + 40))
+    r_ch, g_ch, b_ch, _ = washed_rgba.split()
+    a_ch = Image.new("L", (w, h), opacity)
+    washed_rgba.putalpha(a_ch)
+    canvas.alpha_composite(washed_rgba)
+    washed_rgba.close()
+
+    yield canvas.copy()
+
+    # ── Layer 2: Per-channel pencil dodge (GPU × 3) ───────────────────────────
+    rgb_np = np.array(canvas.convert("RGB"))
+
+    pencil_r = gpu_pencil_dodge_channel(img_np[:, :, 0], blur_size)  # GPU
+    pencil_g = gpu_pencil_dodge_channel(img_np[:, :, 1], blur_size)  # GPU
+    pencil_b = gpu_pencil_dodge_channel(img_np[:, :, 2], blur_size)  # GPU
+    pencil_rgb = np.stack([pencil_r, pencil_g, pencil_b], axis=2).astype(np.float32) / 255.0
+
+    # GPU multiply blend
+    base_f  = rgb_np.astype(np.float32) / 255.0
+    blend_f = gpu_multiply(base_f, pencil_rgb)                        # GPU
+    canvas  = Image.fromarray((blend_f * 255).astype(np.uint8)).convert("RGBA")
+    yield canvas.copy()
+
+    # ── Layer 3: Crosshatch in shadow zones ──────────────────────────────────
+    spacing     = max(8, min(w, h) // 65)
+    hatch_lines = _hatch_shadow(gray, spacing=spacing, dark_thresh=75, angle=45)
+
+    draw_layer = ImageDraw.Draw(canvas)
+    for idx, hatch in enumerate(hatch_lines):
+        if not hatch:
+            continue
+        sx = max(0, min(w - 1, int(hatch[0][0])))
+        sy = max(0, min(h - 1, int(hatch[0][1])))
+        c_sampled = tuple(img_np[sy, sx])
+        shade = tuple(max(0, int(c * 0.55)) for c in c_sampled)
+        pts   = _jitter(hatch, jitter * 0.5)
+        if len(pts) > 1:
+            draw_layer.line(pts, fill=(*shade, 170), width=1)
+        if idx % (batch_size * 2) == 0 or idx == len(hatch_lines) - 1:
+            yield canvas.copy()
+
+    # ── Layer 4: Colour contour strokes ──────────────────────────────────────
+    paths = _combined_paths(gray, blur_size, 35, 110, threshold_block, threshold_c, eps=0.0004)
+
+    cx0, cy0 = w / 2.0, h / 2.0
+    paths.sort(key=lambda p: -((p[0][0] - cx0)**2 + (p[0][1] - cy0)**2)**0.5)
+
+    n = len(paths)
+    eff_batch = max(1, min(batch_size, n // 300)) if n > 0 else batch_size
+
+    for idx, path in enumerate(paths):
+        sx = max(0, min(w - 1, int(path[0][0])))
+        sy = max(0, min(h - 1, int(path[0][1])))
+        c_sampled = tuple(img_np[sy, sx])
+        stroke = tuple(max(0, int(c * 0.55)) for c in c_sampled)
+        pts    = _jitter(path, jitter)
+        if len(pts) > 1:
+            for i in range(len(pts) - 1):
+                draw_layer.line([pts[i], pts[i + 1]], fill=(*stroke, 130), width=1)
+        if idx % eff_batch == 0 or idx == len(paths) - 1:
+            yield canvas.copy()
+
+    yield canvas.copy()
