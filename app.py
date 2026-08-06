@@ -262,16 +262,15 @@ async def draw_stream(
                     h264_filepath = os.path.join(OUTPUT_DIR, f"drawing_{session_id}_h264.mp4")
                     try:
                         # -y to overwrite, -vcodec libx264 for universal mobile compatibility, -pix_fmt yuv420p for Safari/iOS
-                        subprocess.run(
+                        result = subprocess.run(
                             ["ffmpeg", "-y", "-i", video_filepath, "-vcodec", "libx264", "-pix_fmt", "yuv420p", h264_filepath],
-                            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                            capture_output=True, text=True
                         )
-                        # Replace raw video with encoded video
-                        if os.path.exists(h264_filepath):
+                        if result.returncode == 0 and os.path.exists(h264_filepath):
                             os.remove(video_filepath)
                             os.rename(h264_filepath, video_filepath)
                     except Exception as fe:
-                        print(f"[FFmpeg] Error encoding video: {fe}")
+                        print(f"[FFmpeg] Exception encoding video: {fe}")
                 
                 zip_filepath = os.path.join(OUTPUT_DIR, f"tranhve_{session_id}.zip")
                 with zipfile.ZipFile(zip_filepath, 'w') as zipf:
