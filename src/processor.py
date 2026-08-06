@@ -151,11 +151,19 @@ def progressive_draw_generator(
             vw = w - (w % 2)
             vh = h - (h % 2)
             video_path = os.path.join("output", f"drawing_{session_id}.mp4")
+            
+            # Write raw video using mp4v (fast, reliable in OpenCV)
+            # We will post-process this to H.264 using FFmpeg before final export
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
             video_writer = cv2.VideoWriter(
                 video_path,
-                cv2.VideoWriter_fourcc(*"mp4v"),
+                fourcc,
                 15.0, (vw, vh)
             )
+            # Test write ability
+            if not video_writer.isOpened():
+                print("[video] Failed to initialize video writer.")
+                video_writer = None
         except Exception as e:
             print(f"[video] Could not init writer: {e}")
             video_writer = None
@@ -167,12 +175,12 @@ def progressive_draw_generator(
                 try:
                     arr = np.array(frame.convert("RGB"))
                     bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
-                    vw2, vh2 = video_writer.get(cv2.CAP_PROP_FRAME_WIDTH), video_writer.get(cv2.CAP_PROP_FRAME_HEIGHT)
-                    if bgr.shape[1] != int(vw2) or bgr.shape[0] != int(vh2):
-                        bgr = cv2.resize(bgr, (int(vw2), int(vh2)))
+                    # Use local vw and vh defined earlier (OpenCV VideoWriter.get does not support CAP_PROP_FRAME_WIDTH)
+                    if bgr.shape[1] != vw or bgr.shape[0] != vh:
+                        bgr = cv2.resize(bgr, (vw, vh))
                     video_writer.write(bgr)
-                except Exception:
-                    pass
+                except Exception as ve:
+                    print(f"[video] Failed to write frame: {ve}")
             yield frame
     finally:
         if video_writer is not None:

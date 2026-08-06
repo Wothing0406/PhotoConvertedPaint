@@ -19,6 +19,7 @@ RUN apt-get update && apt-get install -y \
     libglib2.0-0 \
     build-essential \
     curl \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # Set python3.10 as default python/pip command
