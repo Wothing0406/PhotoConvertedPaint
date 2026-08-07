@@ -118,14 +118,21 @@ def draw(
             yield canvas.copy()
 
     # ── Pass 3: Placing number labels ────────────────────────────────────────
+    # Placing color index numbers at the centroid of each segmented region
     for ki in range(k):
         mask = (seg == ki).astype(np.uint8) * 255
+        
+        # Smooth and simplify individual color zone masks
+        kernel_lbl = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_lbl)
+        
         cnts_lbl, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not cnts_lbl:
             continue
-        # Label only moderately large regions
+            
+        # Label only moderately large regions (threshold >= 1500 pixels) to avoid overcrowding
         for cnt in cnts_lbl:
-            if cv2.contourArea(cnt) < 2000:
+            if cv2.contourArea(cnt) < 1500:
                 continue
             M = cv2.moments(cnt)
             if M["m00"] == 0:
@@ -133,10 +140,17 @@ def draw(
             lx = int(M["m10"] / M["m00"])
             ly = int(M["m01"] / M["m00"])
             
-            # Color contrast for labels
+            # Draw a subtle outline for labels to make them legible on any background
+            # This makes the numbers clearly visible on both light and dark regions
             bg = tuple(int(c) for c in centers[ki])
             lum = 0.299 * bg[0] + 0.587 * bg[1] + 0.114 * bg[2]
-            txt_col = (40, 40, 40) if lum > 128 else (230, 230, 230)
-            draw_layer.text((lx - 4, ly - 6), str(ki + 1), fill=txt_col)
+            txt_col = (20, 20, 20) if lum > 128 else (245, 245, 245)
+            border_col = (245, 245, 245) if lum > 128 else (20, 20, 20)
+            
+            # Simple border simulation (draw text offset by 1px)
+            text_str = str(ki + 1)
+            for dx, dy in [(-1, -1), (-1, 1), (1, -1), (1, 1)]:
+                draw_layer.text((lx - 4 + dx, ly - 6 + dy), text_str, fill=border_col)
+            draw_layer.text((lx - 4, ly - 6), text_str, fill=txt_col)
 
     yield canvas.copy()

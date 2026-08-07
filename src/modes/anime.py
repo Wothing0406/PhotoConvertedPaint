@@ -57,18 +57,18 @@ def draw(
 
     # ── Step 3: Clean XDoG edge map (optimized parameters for clean lines) ───
     gray_raw = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
-    # Smooth gray image to discard compression artifact block noise
-    gray = cv2.bilateralFilter(gray_raw, 7, 30, 30)
+    # Strong edge-preserving smoothing to remove detailed background brush textures
+    gray = cv2.bilateralFilter(gray_raw, 11, 80, 80)
 
-    # We use larger sigmas to ignore small swirling details and only catch major boundaries
+    # Sigmas and parameters tuned to detect only clean boundary lines
     sigma1 = max(0.8, blur_size * 0.18)
     sigma2 = sigma1 * 1.6
     
-    # Tuned epsilon and tau to prune fine details (like Van Gogh starry night swirls)
+    # Epsilon = -0.05 targets strong contours, suppressing soft background details
     edge_mask = gpu_xdog(gray, sigma1=sigma1, sigma2=sigma2,
-                         tau=0.99, phi=15.0, epsilon=-0.02)
+                         tau=0.985, phi=16.0, epsilon=-0.05)
 
-    # Draw highlights (Sun orb) directly onto the edge mask
+    # Draw highlights (Sun orb / eye highlights)
     try:
         _, thresh_sun = cv2.threshold(gray_raw, 225, 255, cv2.THRESH_BINARY)
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
@@ -76,13 +76,16 @@ def draw(
         cnts_sun, _ = cv2.findContours(thresh_sun, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
         for cnt in cnts_sun:
             p_len = cv2.arcLength(cnt, True)
-            if 30 < p_len < (w + h) * 0.5:
-                # Draw the outline of the sun directly onto our edge mask (0 = black ink line)
+            if 15 < p_len < (w + h) * 0.5:
                 cv2.drawContours(edge_mask, [cnt], -1, 0, max(1, line_art_width))
     except Exception as se:
         print(f"[anime] Sun detection error: {se}")
 
-    # Median blur on edges to remove salt-and-pepper noise spots
+    # Morphology Cleanup: Perform a Close to fill line gaps, and Open to eliminate speckles
+    # This guarantees solid vector-like lines and zero shading noise
+    kernel_clean = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    edge_mask = cv2.morphologyEx(edge_mask, cv2.MORPH_CLOSE, kernel_clean)
+    edge_mask = cv2.morphologyEx(edge_mask, cv2.MORPH_OPEN, kernel_clean)
     edge_mask = cv2.medianBlur(edge_mask, 3)
 
     lw = max(1, line_art_width)

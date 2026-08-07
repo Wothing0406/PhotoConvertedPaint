@@ -139,8 +139,13 @@ def draw(
     for idx, path in enumerate(paths):
         sx = max(0, min(w - 1, int(path[0][0])))
         sy = max(0, min(h - 1, int(path[0][1])))
-        lum  = int(gray[sy, sx])
-        tone = max(6, min(140, int(lum * 0.48)))
+        
+        # Calculate localized luminance for adaptive stroke tones
+        lum = int(gray[sy, sx])
+        # Deep shadows get dark charcoal (6-25), bright regions get delicate light-grey (80-140)
+        tone_factor = 0.32 + 0.35 * (lum / 255.0)
+        tone = max(6, min(140, int(lum * tone_factor)))
+        
         pts  = _jitter(path, jitter)
         if len(pts) > 1:
             for i in range(len(pts) - 1):
