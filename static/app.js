@@ -167,7 +167,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
             if (downloadBtn)  { downloadBtn.classList.add("disabled"); downloadBtn.href = "#"; }
             if (replayBtn)    { replayBtn.classList.add("disabled"); replayBtn.disabled = true; }
-            if (qualityBtn)   { qualityBtn.disabled = true; }
+            if (qualityBtn)   { qualityBtn.disabled = true; qualityBtn.classList.add("disabled"); }
             currentResultPath = null;
 
             drawingFrames = [];
@@ -240,6 +240,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 drawForm.append("wash_opacity",   aiParams ? String(aiParams.wash_opacity   ?? 60)   : "60");
                 drawForm.append("sketch_opacity", aiParams ? String(aiParams.sketch_opacity ?? 0.12) : "0.12");
                 drawForm.append("line_art_width", aiParams ? String(aiParams.line_art_width ?? 1)    : "1");
+                drawForm.append("shadow_strength", aiParams ? String(aiParams.shadow_strength ?? 0.35) : "0.35");
 
                 const response = await fetch("/api/draw-stream", { method: "POST", body: drawForm });
                 if (!response.ok) throw new Error("Lỗi kết nối tới máy chủ vẽ.");
@@ -280,7 +281,7 @@ document.addEventListener("DOMContentLoaded", () => {
                                 downloadBtn.classList.remove("disabled");
                             }
                             if (replayBtn)  { replayBtn.classList.remove("disabled"); replayBtn.disabled = false; }
-                            if (qualityBtn) { qualityBtn.disabled = false; }
+                            if (qualityBtn) { qualityBtn.disabled = false; qualityBtn.classList.remove("disabled"); }
 
                             statusBox.classList.add("success");
                             statusBox.innerHTML = `🎉 <strong>ĐÃ VẼ XONG TÁC PHẨM!</strong><br><br>

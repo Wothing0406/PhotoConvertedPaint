@@ -193,14 +193,15 @@ async def draw_stream(
     bg_color_wash: bool = Form(True),
     wash_opacity: int = Form(75),
     sketch_opacity: float = Form(0.15),
-    line_art_width: int = Form(1)
+    line_art_width: int = Form(1),
+    shadow_strength: float = Form(0.35)
 ):
     """
     Processes the image and yields progressive JPEG-encoded frame chunks.
     Saves drawing video and packages the final result into a ZIP file.
-    Streams progress as: data: <base64_jpeg>\\n\\n
-    Streams totals as:   data: total:<N>\\n\\n
-    Streams filepath as: data: filepath:<path>\\n\\n
+    Streams progress as: data: <base64_jpeg>\n\n
+    Streams totals as:   data: total:<N>\n\n
+    Streams filepath as: data: filepath:<path>\n\n
     """
     cleanup_old_files()
 
@@ -235,7 +236,8 @@ async def draw_stream(
                 bg_color_wash=bg_color_wash,
                 wash_opacity=wash_opacity,
                 sketch_opacity=sketch_opacity,
-                line_art_width=line_art_width
+                line_art_width=line_art_width,
+                shadow_strength=shadow_strength
             ):
                 if final_frame is not None:
                     final_frame.close()
