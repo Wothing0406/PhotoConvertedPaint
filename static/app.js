@@ -126,6 +126,11 @@ document.addEventListener("DOMContentLoaded", () => {
                 const qForm = new FormData();
                 qForm.append("original",    selectedFile);
                 qForm.append("result_path", currentResultPath);
+                
+                // Pass current params to recommend adjustments
+                qForm.append("blur",         blurSlider   ? blurSlider.value   : "5");
+                qForm.append("thresh_block", blockSlider  ? blockSlider.value  : "11");
+                qForm.append("thresh_c",     cSlider      ? cSlider.value      : "2");
 
                 const qRes = await fetch("/api/quality-check", { method: "POST", body: qForm });
                 if (qRes.ok) {
@@ -134,6 +139,11 @@ document.addEventListener("DOMContentLoaded", () => {
                         ? `<br><br><strong>💡 Gợi ý cải thiện:</strong><br>• ${q.suggestions.join("<br>• ")}`
                         : "<br><br>✅ Bức tranh đạt chất lượng tốt!";
 
+                    let redrawButtonHtml = "";
+                    if (q.quality_score < 75) {
+                        redrawButtonHtml = `<br><br><button id="auto-redraw-btn" class="btn primary-btn" style="width: 100%; margin-top: 12px; font-weight: bold; padding: 10px; cursor: pointer;">🔄 Tự Động Vẽ Lại Tối Ưu Hơn</button>`;
+                    }
+
                     statusBox.innerHTML = `
                         🔍 <strong>Kết Quả Kiểm Tra Chất Lượng</strong><br><br>
                         📊 <strong>Điểm tổng: ${q.quality_score}/100 (${q.grade})</strong><br>
@@ -141,7 +151,37 @@ document.addEventListener("DOMContentLoaded", () => {
                         🖼️ Độ phủ canvas: ${q.canvas_coverage_pct}%<br>
                         🔬 Mật độ chi tiết: ${q.detail_density_pct}%
                         ${suggestHtml}
+                        ${redrawButtonHtml}
                     `;
+
+                    // Register event for redraw button if present
+                    const autoRedrawBtn = document.getElementById("auto-redraw-btn");
+                    if (autoRedrawBtn) {
+                        autoRedrawBtn.addEventListener("click", () => {
+                            if (q.recommended_params) {
+                                if (blurSlider) {
+                                    blurSlider.value = q.recommended_params.blur;
+                                    blurVal.textContent = q.recommended_params.blur;
+                                }
+                                if (blockSlider) {
+                                    blockSlider.value = q.recommended_params.thresh_block;
+                                    blockVal.textContent = q.recommended_params.thresh_block;
+                                }
+                                if (cSlider) {
+                                    cSlider.value = q.recommended_params.thresh_c;
+                                    cVal.textContent = q.recommended_params.thresh_c;
+                                }
+                            }
+                            // Untick Gemini to avoid overwriting our adjusted parameters
+                            if (geminiTune) {
+                                geminiTune.checked = false;
+                            }
+                            // Trigger draw click
+                            if (drawBtn) {
+                                drawBtn.click();
+                            }
+                        });
+                    }
                 } else {
                     statusBox.innerText = "Kiểm tra chất lượng thất bại.";
                 }
@@ -149,6 +189,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 statusBox.innerText = `Lỗi kiểm tra: ${e.message}`;
             } finally {
                 qualityBtn.disabled = false;
+                qualityBtn.classList.remove("disabled");
                 qualityBtn.textContent = "🔍 Kiểm Tra Chất Lượng";
             }
         });

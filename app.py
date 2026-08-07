@@ -64,11 +64,15 @@ async def optimize_params(
 @app.post("/api/quality-check")
 async def quality_check(
     original: UploadFile,
-    result_path: str = Form(...)
+    result_path: str = Form(...),
+    blur: int = Form(5),
+    thresh_block: int = Form(11),
+    thresh_c: int = Form(2)
 ):
     """
     Quality Check step: Compares the drawn result PNG to the original image.
     Returns a quality score (0-100) based on edge coverage and structural similarity.
+    Also returns adjusted recommended parameters if the quality is low.
     """
     try:
         import cv2
@@ -118,15 +122,14 @@ async def quality_check(
             matched = np.sum((result_edges > 0) & (orig_edges_dilated > 0))
             edge_coverage = min(100, int(matched * 100 / orig_edge_pixels))
         else:
-            edge_coverage = 50
-        
-        # 2. Structural completeness: check if result has non-white pixels in key regions
-        result_non_white = np.sum(result_gray < 240)
-        result_total = target_w * target_h
-        coverage_ratio = min(100, int(result_non_white * 100 / result_total))
-        
-        # 3. Detail density: number of unique edges in result relative to original
+            edge_coverage = 100
+            
+        # 2. Canvas coverage: how much drawing covers the image
         result_edge_count = np.sum(result_edges > 0)
+        canvas_pixel_count = target_w * target_h
+        coverage_ratio = min(100, int(result_edge_count * 500 / canvas_pixel_count))
+        
+        # 3. Detail density match
         orig_edge_count = max(1, orig_edge_pixels)
         detail_ratio = min(100, int(result_edge_count * 100 / orig_edge_count))
         
@@ -142,12 +145,23 @@ async def quality_check(
                 "Khá" if quality_score >= 40 else "Cần cải thiện"
         
         suggestions = []
-        if edge_coverage < 50:
+        rec_blur = blur
+        rec_block = thresh_block
+        rec_c = thresh_c
+        
+        if edge_coverage < 60:
             suggestions.append("Giảm threshold_c để bắt nhiều nét hơn")
-        if detail_ratio < 40:
+            rec_c = max(1, thresh_c - 1)
+        if detail_ratio < 50:
             suggestions.append("Giảm blur_size để giữ chi tiết mịn")
+            rec_blur = max(1, blur - 2) if blur > 1 else 1
+            if rec_blur % 2 == 0:
+                rec_blur = max(1, rec_blur - 1)
         if coverage_ratio < 30:
-            suggestions.append("Tăng batch_size hoặc chờ vẽ xong hoàn toàn")
+            suggestions.append("Tăng kích thước khối để mở rộng mảng màu/nét vẽ")
+            rec_block = min(51, thresh_block + 4)
+            if rec_block % 2 == 0:
+                rec_block = min(51, rec_block + 1)
         
         return {
             "quality_score": quality_score,
@@ -155,7 +169,12 @@ async def quality_check(
             "edge_coverage_pct": edge_coverage,
             "canvas_coverage_pct": coverage_ratio,
             "detail_density_pct": detail_ratio,
-            "suggestions": suggestions
+            "suggestions": suggestions,
+            "recommended_params": {
+                "blur": rec_blur,
+                "thresh_block": rec_block,
+                "thresh_c": rec_c
+            }
         }
         
     except HTTPException:
