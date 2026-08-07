@@ -97,8 +97,9 @@ def draw(
     **_kw,
 ):
     w, h = pil_img.size
-    img_np = np.array(pil_img.convert("RGB"))
-    gray   = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+    gray_raw = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+    # Bilateral filtering to clear JPEG noise blocks in dark shadows
+    gray = cv2.bilateralFilter(gray_raw, 7, 30, 30)
 
     # ── Layer 1: Colour wash underpainting ───────────────────────────────────
     canvas = Image.new("RGBA", (w, h), (255, 252, 244, 255))
@@ -151,6 +152,21 @@ def draw(
 
     # ── Layer 4: Colour contour strokes ──────────────────────────────────────
     paths = _combined_paths(gray, blur_size, 35, 110, threshold_block, threshold_c, eps=0.0004)
+
+    # Highlight (Sun) detection in pencil sketch
+    try:
+        _, thresh_sun = cv2.threshold(gray_raw, 225, 255, cv2.THRESH_BINARY)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        thresh_sun = cv2.morphologyEx(thresh_sun, cv2.MORPH_OPEN, kernel)
+        cnts_sun, _ = cv2.findContours(thresh_sun, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+        for cnt in cnts_sun:
+            p_len = cv2.arcLength(cnt, True)
+            if 30 < p_len < (w + h) * 0.5:
+                approx = cv2.approxPolyDP(cnt, max(1.0, 0.003 * p_len), True)
+                if len(approx) > 4:
+                    paths.append([tuple(pt[0]) for pt in approx])
+    except Exception as se:
+        print(f"[pencil] Highlight extraction error: {se}")
 
     cx0, cy0 = w / 2.0, h / 2.0
     paths.sort(key=lambda p: -((p[0][0] - cx0)**2 + (p[0][1] - cy0)**2)**0.5)

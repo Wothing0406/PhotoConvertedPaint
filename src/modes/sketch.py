@@ -57,8 +57,9 @@ def draw(
     **_kw,
 ):
     w, h = pil_img.size
-    img_np = np.array(pil_img.convert("RGB"))
-    gray   = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+    gray_raw = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+    # Bilateral filter to smooth out blocky JPEG compression artifacts in shadows/flat areas
+    gray = cv2.bilateralFilter(gray_raw, 7, 30, 30)
 
     # ── Layer 1: Warm paper background ───────────────────────────────────────
     paper = np.full((h, w, 3), (245, 240, 228), dtype=np.uint8)
@@ -105,6 +106,25 @@ def draw(
     clo = max(15, 65 - threshold_c * 6)
     chi = max(60, 150 - threshold_c * 9)
     paths = _canny_paths(gray, clo, chi, blur_size, eps_factor=0.0005)
+
+    # Sun / Glow Highlights extraction: detect the bright sun orb contours
+    try:
+        # Threshold at high luminance (225+) where the sun and sky sunset core reside
+        _, thresh_sun = cv2.threshold(gray_raw, 225, 255, cv2.THRESH_BINARY)
+        # Apply a light morph open to isolate clean circles
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        thresh_sun = cv2.morphologyEx(thresh_sun, cv2.MORPH_OPEN, kernel)
+        
+        cnts_sun, _ = cv2.findContours(thresh_sun, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+        for cnt in cnts_sun:
+            p_len = cv2.arcLength(cnt, True)
+            # Accept highlight regions that look like sun or small clouds (avoid massive frame borders)
+            if 30 < p_len < (w + h) * 0.5:
+                approx = cv2.approxPolyDP(cnt, max(1.0, 0.003 * p_len), True)
+                if len(approx) > 4: # Must be a detailed contour (sun/orb)
+                    paths.append([tuple(pt[0]) for pt in approx])
+    except Exception as se:
+        print(f"[sketch] Error extracting sun contour: {se}")
 
     cx0, cy0 = w / 2.0, h / 2.0
     paths.sort(key=lambda p: -((p[0][0] - cx0)**2 + (p[0][1] - cy0)**2)**0.5)

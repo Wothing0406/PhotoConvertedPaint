@@ -56,7 +56,9 @@ def draw(
     cel = _cel_quantise(smooth, levels=3)
 
     # ── Step 3: Clean XDoG edge map (optimized parameters for clean lines) ───
-    gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+    gray_raw = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+    # Smooth gray image to discard compression artifact block noise
+    gray = cv2.bilateralFilter(gray_raw, 7, 30, 30)
 
     # We use larger sigmas to ignore small swirling details and only catch major boundaries
     sigma1 = max(0.8, blur_size * 0.18)
@@ -65,6 +67,20 @@ def draw(
     # Tuned epsilon and tau to prune fine details (like Van Gogh starry night swirls)
     edge_mask = gpu_xdog(gray, sigma1=sigma1, sigma2=sigma2,
                          tau=0.99, phi=15.0, epsilon=-0.02)
+
+    # Draw highlights (Sun orb) directly onto the edge mask
+    try:
+        _, thresh_sun = cv2.threshold(gray_raw, 225, 255, cv2.THRESH_BINARY)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        thresh_sun = cv2.morphologyEx(thresh_sun, cv2.MORPH_OPEN, kernel)
+        cnts_sun, _ = cv2.findContours(thresh_sun, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+        for cnt in cnts_sun:
+            p_len = cv2.arcLength(cnt, True)
+            if 30 < p_len < (w + h) * 0.5:
+                # Draw the outline of the sun directly onto our edge mask (0 = black ink line)
+                cv2.drawContours(edge_mask, [cnt], -1, 0, max(1, line_art_width))
+    except Exception as se:
+        print(f"[anime] Sun detection error: {se}")
 
     # Median blur on edges to remove salt-and-pepper noise spots
     edge_mask = cv2.medianBlur(edge_mask, 3)

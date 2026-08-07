@@ -182,17 +182,29 @@ def get_optimized_parameters(
             thumb = pil_img.copy()
             thumb.thumbnail((256, 256), Image.Resampling.BILINEAR)
 
-            response = temp_client.models.generate_content(
-                model=model,
-                contents=[thumb, prompt],
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=DrawingParams,
-                    temperature=0.15,
+            import concurrent.futures
+            
+            def _api_call():
+                return temp_client.models.generate_content(
+                    model=model,
+                    contents=[thumb, prompt],
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=DrawingParams,
+                        temperature=0.15,
+                    )
                 )
-            )
-            thumb.close()
 
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_api_call)
+                try:
+                    response = future.result(timeout=8.0)  # 8 seconds strict timeout
+                except concurrent.futures.TimeoutError:
+                    print(f"[Gemini] Key ...{key[-6:]} timed out, trying next.")
+                    thumb.close()
+                    continue
+
+            thumb.close()
             p = json.loads(response.text)
 
             # Enforce ODD for OpenCV params
