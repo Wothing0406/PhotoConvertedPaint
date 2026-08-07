@@ -41,8 +41,8 @@ class DrawingParams(BaseModel):
     wash_opacity: int = Field(description="Underpainting opacity 0-150.")
     sketch_opacity: float = Field(description="Faint guideline opacity 0.0-0.25.")
     line_art_width: int = Field(description="Stroke width: 1=pencil, 2=anime, 3=manga.")
-    shadow_strength: float = Field(description="Intensity of shadow composite (0.0 to 0.5). For landscapes/complex nature scenes, set close to 0.0 to prevent large flat blocky dark artifacts. For portraits, set 0.25-0.45 to enhance face depth.")
-    image_subject: str = Field(description="Detected category of the image. Must be one of: 'portrait_human', 'landscape_nature', 'object_still_life'.")
+    shadow_strength: float = Field(description="Intensity of shadow composite (0.0 to 0.5). For landscapes, set close to 0.0. For portraits, set 0.25-0.45. For animals/pets, set 0.15-0.30 to enhance depth without muddying fur textures.")
+    image_subject: str = Field(description="Detected category of the image. Must be one of: 'portrait_human', 'animal_pet', 'landscape_nature', 'object_still_life'.")
     explanation: str = Field(description="Why these values were chosen. Start with '[Subject Type detected]' followed by rationale.")
 
 
@@ -153,7 +153,7 @@ def get_optimized_parameters(
         "Anime Outline":
             "Clean sparse outlines only. threshold_c=8-14, line_art_width=2, bg_color_wash=false, hatching=0., shadow_strength=0.0",
         "Realistic Sketch":
-            "Canny-only structural edges. threshold_c=3-7, jitter=0.3-0.55, line_art_width=1, hatching=0-0.15. If it's a landscape, shadow_strength should be 0.0-0.1 to avoid big blocky dark shadows. If it's a portrait, shadow_strength can be 0.2-0.4 to add depth.",
+            "Canny-only structural edges. threshold_c=3-7, jitter=0.3-0.55, line_art_width=1, hatching=0-0.15. If it's a landscape, shadow_strength should be 0.0-0.1 to avoid big blocky dark shadows. If it's a portrait, shadow_strength can be 0.2-0.4 to add depth. If it's an animal, shadow_strength should be 0.15-0.3 to maintain soft fur details without mud.",
         "Colored Pencil Sketch":
             "Color-sampled pencil strokes. threshold_c=2-5, bg_color_wash=true, wash_opacity=60-110, hatching=0., shadow_strength=0.0",
         "Oil Painting":
@@ -164,9 +164,10 @@ def get_optimized_parameters(
 
     prompt = (
         f"You are a master artist analyzing an image to prepare parameters for a '{vibe_style}' drawing process.\n"
-        f"1. First, detect the subject: 'portrait_human' (if contains faces/people), 'landscape_nature' (if mountains, trees, sky, sunset), or 'object_still_life'.\n"
+        f"1. First, detect the subject: 'portrait_human' (faces/people), 'animal_pet' (cats, dogs, birds, wildlife), 'landscape_nature' (mountains, trees, sky, sunset, nature), or 'object_still_life'.\n"
         f"2. Based on this, apply the following rules: {style_rules}\n"
-        f"CRITICAL: If the image is a landscape, keep shadow_strength extremely low (0.0 to 0.1) and threshold_c slightly higher to ensure natural gradients and prevent blocky gray/black artifacts in sky, trees, or mountains.\n"
+        f"CRITICAL for landscapes: keep shadow_strength extremely low (0.0 to 0.1) and threshold_c slightly higher to ensure natural gradients and prevent blocky gray/black artifacts.\n"
+        f"CRITICAL for animals: use low blur_size (3 or 5) and moderate shadow_strength (0.15 to 0.25) to preserve thin fine details like fur and whiskers without turning them into blobs.\n"
         f"Return the exact fields defined in the schema."
     )
 
@@ -207,6 +208,9 @@ def get_optimized_parameters(
             subj = p.get("image_subject", "portrait_human")
             if subj == "landscape_nature":
                 p["shadow_strength"] = min(0.12, p["shadow_strength"])
+            elif subj == "animal_pet":
+                p["shadow_strength"] = min(0.28, max(0.12, p["shadow_strength"]))
+                p["blur_size"] = min(5, p["blur_size"])  # Keep blur low for fur detail
 
             if vibe_style in ("Anime Outline", "Oil Painting", "Paint-by-Numbers Blueprint"):
                 p["hatching"] = 0.0
