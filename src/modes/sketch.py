@@ -57,6 +57,7 @@ def draw(
     **_kw,
 ):
     w, h = pil_img.size
+    img_np = np.array(pil_img.convert("RGB"))
     gray_raw = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
     # Bilateral filter to smooth out blocky JPEG compression artifacts in shadows/flat areas
     gray = cv2.bilateralFilter(gray_raw, 7, 30, 30)

@@ -97,6 +97,7 @@ def draw(
     **_kw,
 ):
     w, h = pil_img.size
+    img_np = np.array(pil_img.convert("RGB"))
     gray_raw = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
     # Bilateral filtering to clear JPEG noise blocks in dark shadows
     gray = cv2.bilateralFilter(gray_raw, 7, 30, 30)
