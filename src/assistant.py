@@ -151,24 +151,31 @@ def get_optimized_parameters(
 
     style_rules = {
         "Anime Outline":
-            "Clean sparse outlines only. threshold_c=8-14, line_art_width=2, bg_color_wash=false, hatching=0., shadow_strength=0.0",
+            "Anime: Clean, smooth, and simplified cartoon line-art. Ensure threshold_c=8-15 to keep outlines clean and clear of background noise. Hatching=0, shadow_strength=0.0, bg_color_wash=false, line_art_width=2.",
         "Realistic Sketch":
-            "Canny-only structural edges. threshold_c=3-7, jitter=0.3-0.55, line_art_width=1, hatching=0-0.15. If it's a landscape, shadow_strength should be 0.0-0.1 to avoid big blocky dark shadows. If it's a portrait, shadow_strength can be 0.2-0.4 to add depth. If it's an animal, shadow_strength should be 0.15-0.3 to maintain soft fur details without mud.",
+            "Realistic Sketch: Soft tonal drawing with fine details. Use blur_size=3-5 for detailed textures like human/animal eyes, fur, or wrinkles. If the background is complex (textured/Van Gogh/illustrated), use threshold_c=6-11 to filter background clutter. Otherwise, use threshold_c=3-6. Shadow_strength should be 0.18-0.35 for depth.",
         "Colored Pencil Sketch":
-            "Color-sampled pencil strokes. threshold_c=2-5, bg_color_wash=true, wash_opacity=60-110, hatching=0., shadow_strength=0.0",
+            "Colored Pencil: Color-sampled lines with pencil texture and a warm underpainting wash. Use threshold_c=2-5. Keep wash_opacity=65-110. Hatching=0, shadow_strength=0.0, line_art_width=1.",
         "Oil Painting":
-            "Painterly impasto. blur_size=7-13, jitter=0.5-1.0, bg_color_wash=false, hatching=0., shadow_strength=0.0",
+            "Oil Painting: Bold painterly brushstrokes. Use blur_size=7-13, jitter=0.5-0.9 to give randomized impasto brush weight. Hatching=0, shadow_strength=0.0, bg_color_wash=false.",
         "Paint-by-Numbers Blueprint":
-            "Flat region outlines. threshold_c=3-6, line_art_width=1, bg_color_wash=false, hatching=0., shadow_strength=0.0",
+            "Paint-by-Numbers: Outlined color-regions. Set threshold_c=3-6, line_art_width=1, bg_color_wash=false, hatching=0, shadow_strength=0.0.",
     }.get(vibe_style, "")
 
     prompt = (
-        f"You are a master artist analyzing an image to prepare parameters for a '{vibe_style}' drawing process.\n"
-        f"1. First, detect the subject: 'portrait_human' (faces/people), 'animal_pet' (cats, dogs, birds, wildlife), 'landscape_nature' (mountains, trees, sky, sunset, nature), or 'object_still_life'.\n"
-        f"2. Based on this, apply the following rules: {style_rules}\n"
-        f"CRITICAL for landscapes: keep shadow_strength extremely low (0.0 to 0.1) and threshold_c slightly higher to ensure natural gradients and prevent blocky gray/black artifacts.\n"
-        f"CRITICAL for animals: use low blur_size (3 or 5) and moderate shadow_strength (0.15 to 0.25) to preserve thin fine details like fur and whiskers without turning them into blobs.\n"
-        f"Return the exact fields defined in the schema."
+        f"You are a master artist analyzing an image to prepare optimal drawing parameters for a '{vibe_style}' drawing process.\n"
+        f"\n"
+        f"PARAMETER DEFINITION & TUNING GUIDELINES:\n"
+        f"- blur_size (ODD, 1-21): Lower values (3-5) preserve extremely fine details like eyelashes, catchlights in eyes, animal whiskers. High values (7-13) smooth out and simplify shapes.\n"
+        f"- threshold_c (1-20): High value reduces details and filters noise. If background has complex patterns/strokes (e.g. Van Gogh style, busy textures), select a higher threshold_c (8-14) to avoid clutter. If the subject contains crucial fine lines, set threshold_c (2-6).\n"
+        f"- wash_opacity (0-150): Control opacity of underpainting wash. 0 is pure white canvas.\n"
+        f"- shadow_strength (0.0-0.5): Deepens dark tones. Keep very low (0.0-0.1) for landscapes to prevent blocky gray/black blobs, and moderate (0.2-0.4) for portraits to add facial depth.\n"
+        f"\n"
+        f"DIRECTIONS:\n"
+        f"1. Detect the main subject: 'portrait_human', 'animal_pet', 'landscape_nature', or 'object_still_life'.\n"
+        f"2. Check background complexity: detect if the background is complex (patterns, swirls, wallpaper, busy texture) or simple.\n"
+        f"3. Apply specific style instructions: {style_rules}\n"
+        f"Return the exact fields defined in the schema to produce the most artistic and detailed sketch output."
     )
 
     for key in keys:

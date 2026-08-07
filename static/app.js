@@ -172,9 +172,9 @@ document.addEventListener("DOMContentLoaded", () => {
                                     cVal.textContent = q.recommended_params.thresh_c;
                                 }
                             }
-                            // Untick Gemini to avoid overwriting our adjusted parameters
+                            // Keep Gemini checked to allow it to refine the parameters further during redraw
                             if (geminiTune) {
-                                geminiTune.checked = false;
+                                geminiTune.checked = true;
                             }
                             // Trigger draw click
                             if (drawBtn) {

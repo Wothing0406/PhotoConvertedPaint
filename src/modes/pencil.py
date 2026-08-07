@@ -144,10 +144,16 @@ def draw(
         sx = max(0, min(w - 1, int(hatch[0][0])))
         sy = max(0, min(h - 1, int(hatch[0][1])))
         c_sampled = tuple(img_np[sy, sx])
-        shade = tuple(max(0, int(c * 0.55)) for c in c_sampled)
+        
+        # Calculate local luminance to determine shading factor dynamically
+        lum = int(gray[sy, sx])
+        # Dark areas get deeper colors (30%-45%), light areas get softer tints (55%-65%)
+        shade_factor = 0.35 + 0.30 * (lum / 255.0)
+        shade = tuple(max(0, int(c * shade_factor)) for c in c_sampled)
+        
         pts   = _jitter(hatch, jitter * 0.5)
         if len(pts) > 1:
-            draw_layer.line(pts, fill=(*shade, 170), width=1)
+            draw_layer.line(pts, fill=(*shade, 150), width=1)
         if idx % (batch_size * 2) == 0 or idx == len(hatch_lines) - 1:
             yield canvas.copy()
 
@@ -179,12 +185,31 @@ def draw(
         sx = max(0, min(w - 1, int(path[0][0])))
         sy = max(0, min(h - 1, int(path[0][1])))
         c_sampled = tuple(img_np[sy, sx])
-        stroke = tuple(max(0, int(c * 0.55)) for c in c_sampled)
+        
+        # Calculate local luminance for contour stroke weight
+        lum = int(gray[sy, sx])
+        stroke_factor = 0.28 + 0.32 * (lum / 255.0)
+        stroke = tuple(max(0, int(c * stroke_factor)) for c in c_sampled)
+        
         pts    = _jitter(path, jitter)
         if len(pts) > 1:
             for i in range(len(pts) - 1):
-                draw_layer.line([pts[i], pts[i + 1]], fill=(*stroke, 130), width=1)
+                draw_layer.line([pts[i], pts[i + 1]], fill=(*stroke, 150), width=1)
         if idx % eff_batch == 0 or idx == len(paths) - 1:
             yield canvas.copy()
+
+    # Blend a subtle linen texture into the colored pencil sketch to simulate paper grain
+    from src.gpu_utils import gpu_canvas_texture, gpu_multiply
+    try:
+        canvas_tex = gpu_canvas_texture(w, h)
+        canvas_rgb = np.array(canvas.convert("RGB"))
+        canvas_f = canvas_rgb.astype(np.float32) / 255.0
+        tex_f = canvas_tex.astype(np.float32)[:, :, np.newaxis] / 255.0
+        # Light blend: mix 85% of standard canvas with 15% multiplied canvas texture
+        multiplied = gpu_multiply(canvas_f, np.repeat(tex_f, 3, axis=2))
+        blended = cv2.addWeighted(canvas_f, 0.85, multiplied, 0.15, 0)
+        canvas = Image.fromarray((np.clip(blended, 0.0, 1.0) * 255).astype(np.uint8)).convert("RGBA")
+    except Exception as te:
+        print(f"[pencil] Linen texture blending failed: {te}")
 
     yield canvas.copy()
