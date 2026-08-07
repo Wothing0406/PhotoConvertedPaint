@@ -1,4 +1,4 @@
-﻿# TranhVe — Smart Portrait-to-Sketch Engine (GPU CUDA Accelerated)
+# TranhVe — Smart Portrait-to-Sketch Engine (GPU CUDA Accelerated)
 
 Dự án chuyển đổi ảnh chân dung thành các tác phẩm nghệ thuật dạng nét vẽ tay, tranh sơn dầu, tranh anime và tranh số hóa tự tô màu thông minh. Hệ thống hỗ trợ xử lý tăng tốc phần cứng thông qua **NVIDIA GPU CUDA (CuPy + ONNX Runtime)** và tương tác với Gemini 3.1 Flash Lite API để tối ưu thông số vẽ.
 
@@ -25,6 +25,20 @@ Dự án chuyển đổi ảnh chân dung thành các tác phẩm nghệ thuật
 *   **✒️ Nét vẽ Anime (Anime Outline)**: Lược bỏ chi tiết nhiễu nền, giữ lại đường nét cartoon dày dặn sạch sẽ bằng thuật toán **XDoG** cải tiến.
 *   **🎨 Tranh sơn dầu (Oil Painting)**: Mảng màu impasto dày dặn sử dụng Median Blur sâu kết hợp màng phủ vân vải canvas linen thực tế trên GPU.
 *   **🔢 Tranh số hóa tự tô (Paint-by-Numbers)**: Thuật toán K-Means gom 12 vùng màu phẳng lớn, tự động đi viền ranh giới màu sắc và đánh số thứ tự chỉ dẫn cực kỳ trực quan.
+
+---
+
+## 🚀 Các Tính Năng Đột Phá Mới Cập Nhật
+
+1.  **🤖 Phân Loại Chủ Thể AI Trực Quan (Subject-Aware Vision AI)**
+    *   Tự động phát hiện 4 loại ảnh: `portrait_human` (người), `animal_pet` (thú cưng, chó, mèo), `landscape_nature` (phong cảnh, thiên nhiên), và `object_still_life` (tĩnh vật).
+    *   Cấu hình thông số vẽ chuyên biệt cho từng chủ thể (ví dụ: giảm bóng tối ở phong cảnh để tránh bết màu, tăng nét vẽ tơ mịn cho lông thú cưng).
+2.  **🔍 Kiểm Tra Chất Lượng & Vẽ Lại Thông Minh (Auto-Redraw)**
+    *   Chấm điểm độ tương đồng (0-100) dựa trên độ bao phủ nét viền (Canny), độ bao phủ canvas, và độ chi tiết.
+    *   Nếu điểm số thấp (<75/100), hệ thống tự động đưa ra các đề xuất điều chỉnh thông số và hiển thị nút `🔄 Tự Động Vẽ Lại Tối Ưu Hơn`. Khi click, các slider sẽ tự động dịch chuyển về vị trí lý tưởng và khởi tạo vẽ lại ngay lập tức.
+3.  **💾 Quản Lý VRAM RTX 3050 Laptop An Toàn**
+    *   **Giới hạn độ phân giải vàng 1200px**: Giúp tranh cực kỳ chi tiết nhưng tiết kiệm tới 45% bộ nhớ VRAM so với mức 1600px cũ.
+    *   **Giải phóng VRAM tự động (`gpu_clear_cache`)**: Ép giải phóng bộ nhớ đệm ma trận CuPy VRAM trước và sau mỗi lượt vẽ để loại bỏ hoàn toàn lỗi tràn/sập nguồn VRAM.
 
 ---
 
