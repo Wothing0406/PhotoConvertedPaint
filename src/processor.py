@@ -21,7 +21,7 @@ from PIL import Image
 from rembg import remove
 
 from src.modes import sketch, pencil, anime, oil, blueprint
-from src.gpu_utils import gpu_status, GPU_AVAILABLE
+from src.gpu_utils import gpu_status, GPU_AVAILABLE, gpu_clear_cache
 
 
 VIBE_MAP = {
@@ -83,6 +83,9 @@ def progressive_draw_generator(
     import cv2
     import numpy as np
 
+    # Clear VRAM at start to ensure maximum free capacity
+    gpu_clear_cache()
+
     # ── Defensive normalise: always give modes clean RGB (H,W,3) uint8 ──────────
     # Handles CMYK, P (palette), L (grayscale), LA, RGBA, and exotic formats
     if pil_img.mode not in ("RGB",):
@@ -90,8 +93,9 @@ def progressive_draw_generator(
     else:
         pil_img = pil_img.convert("RGB")
 
-    # ── High Resolution Drawing: Cap at 1600px to prevent Out of Memory ──────
-    max_res = 1600
+    # ── High Resolution Drawing: Cap at 1200px to prevent Out of Memory ──────
+    # 1200px is highly detailed (1.2 Megapixels) but uses ~45% less VRAM than 1600px
+    max_res = 1200
     w0, h0 = pil_img.size
     scale = min(1.0, max_res / max(w0, h0))
     if scale < 1.0:
@@ -188,3 +192,5 @@ def progressive_draw_generator(
         if video_writer is not None:
             video_writer.release()
             print("[video] Writer released.")
+        # Clear VRAM cache immediately after drawing finishes
+        gpu_clear_cache()

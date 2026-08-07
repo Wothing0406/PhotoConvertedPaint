@@ -1,4 +1,4 @@
-﻿"""
+"""
 src/gpu_utils.py — Centralised GPU Acceleration Layer
 ======================================================
 All 5 drawing modes route through this module.
@@ -249,3 +249,13 @@ def gpu_status() -> str:
         name = _cp.cuda.runtime.getDeviceProperties(0)['name'].decode()
         return f"GPU ON  — {name} | VRAM {free//1024**2}/{total//1024**2} MB free"
     return "GPU OFF — CPU fallback active"
+
+
+def gpu_clear_cache():
+    if GPU_AVAILABLE and _cp is not None:
+        try:
+            _cp.get_default_memory_pool().free_all_blocks()
+            _cp.get_default_pinned_memory_pool().free_all_blocks()
+            print("[GPU] VRAM Memory Pool cleared successfully.")
+        except Exception as e:
+            print(f"[GPU] Error clearing VRAM cache: {e}")
