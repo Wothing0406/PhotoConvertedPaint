@@ -94,7 +94,8 @@ def draw(
     dark_raw = (gray < 85).astype(np.uint8) * 255
     dark_mask = gpu_gaussian_blur(dark_raw, 19).astype(np.float32) / 255.0   # GPU
 
-    canvas_np = gpu_dark_mask_composite(canvas_np.astype(np.float32), dark_mask, strength=0.35)
+    shadow_strength = _kw.get("shadow_strength", 0.35)
+    canvas_np = gpu_dark_mask_composite(canvas_np.astype(np.float32), dark_mask, strength=shadow_strength)
 
     pil_canvas = Image.fromarray(canvas_np)
     yield pil_canvas.copy()

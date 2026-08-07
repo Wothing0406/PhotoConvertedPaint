@@ -41,7 +41,9 @@ class DrawingParams(BaseModel):
     wash_opacity: int = Field(description="Underpainting opacity 0-150.")
     sketch_opacity: float = Field(description="Faint guideline opacity 0.0-0.25.")
     line_art_width: int = Field(description="Stroke width: 1=pencil, 2=anime, 3=manga.")
-    explanation: str = Field(description="Why these values were chosen.")
+    shadow_strength: float = Field(description="Intensity of shadow composite (0.0 to 0.5). For landscapes/complex nature scenes, set close to 0.0 to prevent large flat blocky dark artifacts. For portraits, set 0.25-0.45 to enhance face depth.")
+    image_subject: str = Field(description="Detected category of the image. Must be one of: 'portrait_human', 'landscape_nature', 'object_still_life'.")
+    explanation: str = Field(description="Why these values were chosen. Start with '[Subject Type detected]' followed by rationale.")
 
 
 def is_api_available() -> bool:
@@ -74,30 +76,35 @@ _DEFAULTS = {
         "blur_size": 5, "threshold_block": 21, "threshold_c": 10,
         "jitter": 0.15, "hatching": 0.0, "bg_color_wash": False,
         "wash_opacity": 0, "sketch_opacity": 0.0, "line_art_width": 2,
+        "shadow_strength": 0.0, "image_subject": "portrait_human",
         "explanation": "Anime: bilateral-smoothed Canny, clean sparse outlines, no wash."
     },
     "Realistic Sketch": {
         "blur_size": 3, "threshold_block": 11, "threshold_c": 5,
         "jitter": 0.40, "hatching": 0.0, "bg_color_wash": True,
         "wash_opacity": 50, "sketch_opacity": 0.12, "line_art_width": 1,
+        "shadow_strength": 0.35, "image_subject": "portrait_human",
         "explanation": "Realistic Sketch: thin tonal charcoal strokes on warm paper."
     },
     "Colored Pencil Sketch": {
         "blur_size": 3, "threshold_block": 11, "threshold_c": 4,
         "jitter": 0.35, "hatching": 0.0, "bg_color_wash": True,
         "wash_opacity": 75, "sketch_opacity": 0.13, "line_art_width": 1,
+        "shadow_strength": 0.0, "image_subject": "portrait_human",
         "explanation": "Colored Pencil: color-sampled strokes with soft wash underpainting."
     },
     "Oil Painting": {
         "blur_size": 7, "threshold_block": 25, "threshold_c": 8,
         "jitter": 0.65, "hatching": 0.0, "bg_color_wash": False,
         "wash_opacity": 0, "sketch_opacity": 0.0, "line_art_width": 1,
+        "shadow_strength": 0.0, "image_subject": "portrait_human",
         "explanation": "Oil Painting: directional impasto brush strokes, canvas background."
     },
     "Paint-by-Numbers Blueprint": {
         "blur_size": 5, "threshold_block": 25, "threshold_c": 4,
         "jitter": 0.1, "hatching": 0.0, "bg_color_wash": False,
         "wash_opacity": 0, "sketch_opacity": 0.0, "line_art_width": 1,
+        "shadow_strength": 0.0, "image_subject": "portrait_human",
         "explanation": "Paint-by-Numbers: flat color fills, numbered regions, clean borders."
     },
 }
@@ -144,26 +151,23 @@ def get_optimized_parameters(
 
     style_rules = {
         "Anime Outline":
-            "Clean sparse outlines only. threshold_c=8-14, line_art_width=2, bg_color_wash=false, hatching=0.",
+            "Clean sparse outlines only. threshold_c=8-14, line_art_width=2, bg_color_wash=false, hatching=0., shadow_strength=0.0",
         "Realistic Sketch":
-            "Canny-only structural edges. threshold_c=3-7, jitter=0.3-0.55, line_art_width=1, hatching=0-0.15.",
+            "Canny-only structural edges. threshold_c=3-7, jitter=0.3-0.55, line_art_width=1, hatching=0-0.15. If it's a landscape, shadow_strength should be 0.0-0.1 to avoid big blocky dark shadows. If it's a portrait, shadow_strength can be 0.2-0.4 to add depth.",
         "Colored Pencil Sketch":
-            "Color-sampled pencil strokes. threshold_c=2-5, bg_color_wash=true, wash_opacity=60-110, hatching=0.",
+            "Color-sampled pencil strokes. threshold_c=2-5, bg_color_wash=true, wash_opacity=60-110, hatching=0., shadow_strength=0.0",
         "Oil Painting":
-            "Painterly impasto. blur_size=7-13, jitter=0.5-1.0, bg_color_wash=false, hatching=0.",
+            "Painterly impasto. blur_size=7-13, jitter=0.5-1.0, bg_color_wash=false, hatching=0., shadow_strength=0.0",
         "Paint-by-Numbers Blueprint":
-            "Flat region outlines. threshold_c=3-6, line_art_width=1, bg_color_wash=false, hatching=0.",
+            "Flat region outlines. threshold_c=3-6, line_art_width=1, bg_color_wash=false, hatching=0., shadow_strength=0.0",
     }.get(vibe_style, "")
 
     prompt = (
-        f"You are a master artist. Analyze this image for the '{vibe_style}' drawing style.\n"
-        f"Style rules: {style_rules}\n"
-        f"Parameters to return (JSON):\n"
-        f"  blur_size (ODD 1-21), threshold_block (ODD 3-51), threshold_c (1-20),\n"
-        f"  jitter (0.0-1.5), hatching (0.0-0.3), bg_color_wash (bool),\n"
-        f"  wash_opacity (0-150), sketch_opacity (0.0-0.25), line_art_width (1-3),\n"
-        f"  explanation (short string).\n"
-        f"Base your choices on the image's complexity, lighting, edge density, and color."
+        f"You are a master artist analyzing an image to prepare parameters for a '{vibe_style}' drawing process.\n"
+        f"1. First, detect the subject: 'portrait_human' (if contains faces/people), 'landscape_nature' (if mountains, trees, sky, sunset), or 'object_still_life'.\n"
+        f"2. Based on this, apply the following rules: {style_rules}\n"
+        f"CRITICAL: If the image is a landscape, keep shadow_strength extremely low (0.0 to 0.1) and threshold_c slightly higher to ensure natural gradients and prevent blocky gray/black artifacts in sky, trees, or mountains.\n"
+        f"Return the exact fields defined in the schema."
     )
 
     for key in keys:
@@ -197,11 +201,19 @@ def get_optimized_parameters(
 
             # Safety clamps
             p["hatching"] = max(0.0, min(0.3, float(p.get("hatching", 0.0))))
+            p["shadow_strength"] = max(0.0, min(0.5, float(p.get("shadow_strength", 0.35))))
+            
+            # Subject-based constraints
+            subj = p.get("image_subject", "portrait_human")
+            if subj == "landscape_nature":
+                p["shadow_strength"] = min(0.12, p["shadow_strength"])
+
             if vibe_style in ("Anime Outline", "Oil Painting", "Paint-by-Numbers Blueprint"):
                 p["hatching"] = 0.0
                 p["bg_color_wash"] = False
+                p["shadow_strength"] = 0.0
 
-            tag = f"Gemini ({model}, key ...{key[-6:]})"
+            tag = f"Gemini ({model}, {subj})"
             p["explanation"] = f"{tag}: {str(p.get('explanation', ''))[:120]}"
             print(f"[Gemini] OK: {p['explanation'][:80]}")
             return p
