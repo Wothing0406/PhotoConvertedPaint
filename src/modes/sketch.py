@@ -182,17 +182,27 @@ def _generate_cross_contour_hatching(gray, saliency_norm, w, h, hatching_intensi
     
     for y in range(spacing // 2, h, spacing):
         for x in range(spacing // 2, w, spacing):
-            sal = float(saliency_norm[y, x]) if saliency_norm is not None else 1.0
-            
-            dist = np.sqrt((x - fc[0])**2 + (y - fc[1])**2)
-            sal_thresh = 0.22 if dist < R else 0.45 # drop background shading aggressively
-            if sal < sal_thresh:
-                continue
-                
             lum = int(gray[y, x])
             if lum >= 215:
                 continue
                 
+            dist = np.sqrt((x - fc[0])**2 + (y - fc[1])**2)
+            sal = float(saliency_norm[y, x]) if saliency_norm is not None else 1.0
+            
+            # If it's a dark shadow region (e.g. hair, dark clothes, shadow folds),
+            # we ALWAYS hatch it to build the dark values of the sketch, bypassing saliency gating.
+            if lum >= 85:
+                # For midtones/lights, we use saliency gating to keep background clean
+                sal_thresh = 0.20 if dist < R else 0.45
+                if sal < sal_thresh:
+                    continue
+                    
+                # Midtone hatching slider check
+                if hatching_intensity <= 0.05:
+                    continue
+                if random.random() > hatching_intensity:
+                    continue
+            
             is_face = dist < R
             if is_face and lum > 140:
                 if random.random() > 0.25:
@@ -200,11 +210,6 @@ def _generate_cross_contour_hatching(gray, saliency_norm, w, h, hatching_intensi
                 tone = random.randint(210, 230)
                 lw = 1
             else:
-                if lum >= 85 and hatching_intensity <= 0.05:
-                    continue
-                if lum >= 85 and random.random() > hatching_intensity:
-                    continue
-                    
                 if lum < 50:
                     tone = random.randint(2, 12)
                     lw = 2
