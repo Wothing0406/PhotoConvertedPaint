@@ -284,6 +284,15 @@ document.addEventListener("DOMContentLoaded", () => {
                 drawForm.append("line_art_width", aiParams ? String(aiParams.line_art_width ?? 1)    : "1");
                 drawForm.append("shadow_strength", aiParams ? String(aiParams.shadow_strength ?? 0.35) : "0.35");
 
+                // Dynamically forward all other Gemini parameters (like face landmarks and tilt angles)
+                if (aiParams) {
+                    for (const key in aiParams) {
+                        if (!["blur_size", "threshold_block", "threshold_c", "jitter", "hatching", "bg_color_wash", "wash_opacity", "sketch_opacity", "line_art_width", "shadow_strength", "explanation"].includes(key)) {
+                            drawForm.append(key, String(aiParams[key]));
+                        }
+                    }
+                }
+
                 const response = await fetch("/api/draw-stream", { method: "POST", body: drawForm });
                 if (!response.ok) throw new Error("Lỗi kết nối tới máy chủ vẽ.");
 

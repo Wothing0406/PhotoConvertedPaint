@@ -1,19 +1,21 @@
 """
 modes/sketch.py — Realistic Charcoal/Pencil Sketch
 =====================================================
-Approach: MASTER progressive sketching technique
+Approach: MASTER progressive sketching technique with Gemini-Guided Structural Draft & Eraser Phase
   1. Start with a pure white paper canvas.
-  2. Single-line outline extraction:
-     - Hessian Ridge Detection for single centerlines of dark features (hair, eyes, eyebrows).
-     - XDoG/Canny boundaries thinned using a large 9x9 merge kernel to eliminate double borders.
-     - Smooth path coordinates using moving average to remove step jaggies.
-     - No jitter on subject/face (sal > 0.20) to prevent facial distortion.
-  3. Cross-Contour Hatching:
-     - Short shading strokes oriented along the tangent of local gradients (flows along hair and curves).
-     - Skip skin highlights (sal > 0.45 and lum > 140) to keep the face clean and bright.
-     - Deep black strokes (tone 2-15, width 2) in hair and dark clothing for high contrast.
-  4. Eye Catchlight Protection:
-     - High-salient white spots from original image are preserved as pure white paper highlights.
+  2. Layer 1: Structural Draft (Phác thảo cấu trúc):
+     - Draw faint, light-gray geometric guidelines based on Gemini landmarks (face oval, tilt axes, eyes).
+     - Extract and draw large shape outlines in light gray as the underdrawing.
+  3. Layer 2: Detailed Linework (Nét vẽ chi tiết):
+     - Draw precise, dark outlines on top of the draft.
+     - Focal point detail: Keep lines near the face center (Gemini face landmarks) sharp, dark, and highly detailed.
+     - Simplification (buông lỏng hậu cảnh): Farther regions are simplified and drawn lighter.
+  4. Layer 3: Sweeping Contour Hatching (Đánh bóng tối):
+     - Tangent-aligned long sweeping shading strokes.
+     - Dark shadows (lum < 60) always get shaded. Midtone shadow density is scaled by hatching slider.
+  5. Eraser Phase (Xoá nét dư thừa):
+     - In the final 20 frames, progressively fade out the light-gray structural guidelines (reduce opacity to 0).
+  6. Eye Catchlight Protection: highlights remain 100% white.
 """
 
 import cv2
@@ -26,15 +28,6 @@ from src.gpu_utils import (
     gpu_saliency,
     GPU_AVAILABLE,
 )
-
-
-def _jitter(pts, amount: float):
-    result, dx, dy = [], 0.0, 0.0
-    for x, y in pts:
-        dx = 0.82 * dx + 0.18 * random.gauss(0, amount * 1.5)
-        dy = 0.82 * dy + 0.18 * random.gauss(0, amount * 1.5)
-        result.append((x + dx, y + dy))
-    return result
 
 
 def _smooth_path(path, window_size=3):
@@ -66,10 +59,20 @@ def _thin_edges(binary_img):
     return skel
 
 
-def _build_contour_paths(gray, saliency_norm, clo, chi, min_path_len=8):
+def _dog_edges(gray, sigma=1.2, k=1.6, tau=0.98, thresh=8):
+    g1 = cv2.GaussianBlur(gray, (0, 0), sigma)
+    g2 = cv2.GaussianBlur(gray, (0, 0), sigma * k)
+    dog = g1.astype(np.float32) - tau * g2.astype(np.float32)
+    
+    edges = np.zeros_like(gray)
+    edges[dog < -thresh] = 255
+    return edges
+
+
+def _build_contour_paths(gray, saliency_norm, clo, chi, min_path_len=15):
     h, w = gray.shape
 
-    # 1. Hessian Ridge Detection for centerlines of dark lines (eyebrows, hair, eyes)
+    # 1. Hessian Ridge
     blurred = cv2.GaussianBlur(gray, (5, 5), 0.8)
     Ixx = cv2.Sobel(blurred, cv2.CV_32F, 2, 0, ksize=3)
     Iyy = cv2.Sobel(blurred, cv2.CV_32F, 0, 2, ksize=3)
@@ -77,16 +80,14 @@ def _build_contour_paths(gray, saliency_norm, clo, chi, min_path_len=8):
     val = 0.5 * (Ixx + Iyy + np.sqrt((Ixx - Iyy)**2 + 4 * Ixy**2))
     
     ridges = np.zeros_like(gray, dtype=np.uint8)
-    ridges[val > 5.0] = 255
+    ridges[val > 5.5] = 255
 
-    # 2. Boundary detection
-    edges = cv2.Canny(gray, clo, chi)
+    # 2. DoG Edges
+    edges = _dog_edges(gray, sigma=1.2, k=1.6, tau=0.97, thresh=6)
     
-    # Dilate with a larger 9x9 kernel to merge double borders up to 8px apart
     merge_k = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9))
     merged = cv2.dilate(edges, merge_k, iterations=1)
     
-    # Combine ridges and thinned edges
     combined = cv2.bitwise_or(merged, ridges)
     thinned = _thin_edges(combined)
     
@@ -100,16 +101,31 @@ def _build_contour_paths(gray, saliency_norm, clo, chi, min_path_len=8):
         if len(approx) > 1:
             path = [tuple(pt[0]) for pt in approx]
             if len(path) > 1:
+                # Filter out outlines in very dark regions where shading takes over
+                mx, my = path[len(path)//2]
+                rx, ry = max(0, min(w-1, int(mx))), max(0, min(h-1, int(my)))
+                if gray[ry, rx] < 40 and saliency_norm[ry, rx] < 0.25:
+                    continue
+                    
                 smoothed = _smooth_path(path, window_size=3)
                 paths.append(smoothed)
     return paths
 
 
-def _generate_cross_contour_hatching(gray, saliency_norm, w, h):
+def _draw_tapered_line(draw_layer, pts, color, base_width):
+    N = len(pts)
+    if N < 2:
+        return
+    for i in range(N - 1):
+        t = (i + 0.5) / N
+        w = max(1.0, base_width * np.sin(np.pi * t))
+        draw_layer.line([pts[i], pts[i+1]], fill=color, width=int(round(w)))
+
+
+def _generate_cross_contour_hatching(gray, saliency_norm, w, h, hatching_intensity, fc, R):
     strokes = []
-    spacing = max(6, min(w, h) // 90)
+    spacing = max(12, min(w, h) // 70)
     
-    # Smooth gradients to find clean tangent flows
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
     sobelx = cv2.Sobel(blurred, cv2.CV_32F, 1, 0, ksize=3)
     sobely = cv2.Sobel(blurred, cv2.CV_32F, 0, 1, ksize=3)
@@ -117,18 +133,27 @@ def _generate_cross_contour_hatching(gray, saliency_norm, w, h):
     for y in range(spacing // 2, h, spacing):
         for x in range(spacing // 2, w, spacing):
             sal = float(saliency_norm[y, x]) if saliency_norm is not None else 1.0
-            if sal < 0.08:
+            
+            # Saliency gating: higher threshold farther from face to simplify background
+            dist = np.sqrt((x - fc[0])**2 + (y - fc[1])**2)
+            sal_thresh = 0.22 if dist < R else 0.40
+            if sal < sal_thresh:
                 continue
                 
             lum = int(gray[y, x])
             if lum >= 205:
-                continue  # Highlight: keep paper white
+                continue
                 
-            # Gate shading on face skin to keep it bright and clean
+            if lum >= 60 and hatching_intensity <= 0.05:
+                continue
+                
+            if lum >= 60 and random.random() > hatching_intensity:
+                continue
+                
+            # Face protection
             if sal > 0.45 and lum > 140:
                 continue
                 
-            # Compute tangent flow direction
             dx = sobelx[y, x]
             dy = sobely[y, x]
             mag = np.sqrt(dx**2 + dy**2)
@@ -138,40 +163,42 @@ def _generate_cross_contour_hatching(gray, saliency_norm, w, h):
             else:
                 angle = np.radians(45.0)
                 
-            angle += np.radians(random.uniform(-10, 10))
+            angle += np.radians(random.uniform(-8, 8))
             
-            # Shading size & density
-            if lum < 80:
-                # Deep shadow: cross-hatching for high contrast
-                lengths = [random.uniform(10, 18), random.uniform(8, 14)]
-                angles = [angle, angle + np.pi / 2.0]
+            # Long, sweeping strokes
+            if lum < 60:
+                L = random.uniform(30, 45)
             else:
-                # Midtone: single hatching
-                lengths = [random.uniform(8, 14)]
-                angles = [angle]
+                L = random.uniform(22, 32)
                 
-            for L, ang in zip(lengths, angles):
-                cos_a = np.cos(ang)
-                sin_a = np.sin(ang)
-                x1 = x - cos_a * L / 2.0 + random.uniform(-0.5, 0.5)
-                y1 = y - sin_a * L / 2.0 + random.uniform(-0.5, 0.5)
-                x2 = x + cos_a * L / 2.0 + random.uniform(-0.5, 0.5)
-                y2 = y + sin_a * L / 2.0 + random.uniform(-0.5, 0.5)
+            # Simplify background strokes (make them shorter/lighter)
+            if dist >= R:
+                L *= 0.7
                 
-                # Dynamic contrast and line weight
-                if lum < 50:
-                    tone = random.randint(2, 12)  # Deep black
-                    lw = 2
-                elif lum < 100:
-                    tone = random.randint(12, 40)
-                    lw = 2 if random.random() > 0.6 else 1
-                else:
-                    tone = random.randint(50, 100)
-                    lw = 1
-                    
-                strokes.append(((x1, y1), (x2, y2), tone, lw, y))
+            cos_a = np.cos(angle)
+            sin_a = np.sin(angle)
+            x1 = x - cos_a * L / 2.0 + random.uniform(-0.5, 0.5)
+            y1 = y - sin_a * L / 2.0 + random.uniform(-0.5, 0.5)
+            x2 = x + cos_a * L / 2.0 + random.uniform(-0.5, 0.5)
+            y2 = y + sin_a * L / 2.0 + random.uniform(-0.5, 0.5)
+            
+            if lum < 50:
+                tone = random.randint(2, 12)
+                lw = 2
+            elif lum < 100:
+                tone = random.randint(12, 40)
+                lw = 2 if random.random() > 0.7 else 1
+            else:
+                tone = random.randint(50, 100)
+                lw = 1
                 
-    # Sort top-to-bottom
+            # Fade out strokes far from focal point
+            if dist >= R:
+                tone = min(220, tone + 80)
+                lw = 1
+                
+            strokes.append(((x1, y1), (x2, y2), tone, lw, y))
+                
     strokes.sort(key=lambda s: s[4] + random.uniform(-30, 30))
     return strokes
 
@@ -194,8 +221,9 @@ def draw(
     blur_size: int = 3,
     threshold_c: int = 5,
     jitter: float = 0.45,
+    hatching: float = 0.0,
     batch_size: int = 10,
-    **_kw,
+    **kw,
 ):
     w, h = pil_img.size
     img_np = np.array(pil_img.convert("RGB"))
@@ -204,35 +232,83 @@ def draw(
     gray = cv2.bilateralFilter(gray_raw, 7, 30, 30)
     saliency_norm = gpu_saliency(gray_raw)
 
-    # Detect original highlights (catchlights) to preserve
+    # Detect original highlights (catchlights)
     highlight_mask = (gray_raw > 225) & (saliency_norm > 0.35)
     highlight_mask = cv2.dilate(highlight_mask.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
 
-    # ── Canvas starts as pure white paper ─────────────────────────────────────
-    canvas_np = np.full((h, w, 3), 255, dtype=np.uint8)
-    pil_canvas = Image.fromarray(canvas_np)
-    yield pil_canvas.copy()
+    # ── Parse Gemini face landmarks for focal point & draft lines ─────────────
+    face_cx = float(kw.get("face_center_x", 0.5))
+    face_cy = float(kw.get("face_center_y", 0.4))
+    face_w = float(kw.get("face_width", 0.3))
+    face_h = float(kw.get("face_height", 0.45))
+    tilt = float(kw.get("head_tilt_angle", 0.0))
 
-    # ── Step 1: Draw outline contours (No double borders, no face jitter) ─────
+    fc = (face_cx * w, face_cy * h)
+    R = max(face_w * w, face_h * h) * 1.1
+
+    bs = max(5, min(50, batch_size))
+    target_frames = int(1600 - (bs - 5) * (1300 / 45))
+    target_frames = max(200, min(1600, target_frames))
+
+    # ── Create transparent Layer for Structural Draft Guidelines ──────────────
+    draft_canvas = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    draft_draw = ImageDraw.Draw(draft_canvas)
+    
+    # Draw faint geometric landmarks (head oval, tilted axes, eyes alignment)
+    guide_color = (235, 235, 235, 255) # faint gray
+    
+    # 1. Head Oval
+    draft_draw.ellipse(
+        [fc[0] - face_w * w / 2, fc[1] - face_h * h / 2, fc[0] + face_w * w / 2, fc[1] + face_h * h / 2],
+        outline=guide_color, width=1
+    )
+    # 2. Main Vertical Axis (Head Tilt)
+    rad = np.radians(tilt)
+    cos_t, sin_t = np.cos(rad), np.sin(rad)
+    draft_draw.line(
+        [fc[0] - sin_t * face_h * h / 2, fc[1] - cos_t * face_h * h / 2,
+         fc[0] + sin_t * face_h * h / 2, fc[1] + cos_t * face_h * h / 2],
+        fill=guide_color, width=1
+    )
+    # 3. Horizontal Eye Line
+    draft_draw.line(
+        [fc[0] - cos_t * face_w * w / 2, fc[1] + sin_t * face_w * w / 2,
+         fc[0] + cos_t * face_w * w / 2, fc[1] - sin_t * face_w * w / 2],
+        fill=guide_color, width=1
+    )
+
+    # ── Drawing Layer (outlines & hatching) ───────────────────────────────────
+    drawing_canvas = Image.new("RGBA", (w, h), (255, 255, 255, 0))
+    draw_layer = ImageDraw.Draw(drawing_canvas)
+
+    # Initial frame: Show underdrawing/draft guidelines
+    # We yield the composite of paper + draft_layer
+    paper_base = Image.new("RGB", (w, h), (255, 255, 255))
+    frame_img = paper_base.copy()
+    frame_img.paste(draft_canvas, (0, 0), mask=draft_canvas.split()[3])
+    yield frame_img.copy()
+
+    # ── Step 1: Draw Outlines (guidelines/landmarks drawn first, then details) ──
     clo = max(15, 60 - threshold_c * 5)
     chi = max(45, 140 - threshold_c * 8)
-    outlines = _build_contour_paths(gray, saliency_norm, clo, chi, min_path_len=8)
-
-    # Draw primary features first
+    outlines = _build_contour_paths(gray, saliency_norm, clo, chi, min_path_len=15)
     outlines.sort(key=lambda p: _path_saliency(p, saliency_norm, w, h), reverse=True)
 
-    draw_layer = ImageDraw.Draw(pil_canvas)
     n_out = len(outlines)
-    eff_out = max(1, min(batch_size, max(1, n_out // 120)))
+    target_out_frames = max(30, target_frames // 4)
+    eff_out = max(1, n_out // target_out_frames)
 
     for idx, path in enumerate(outlines):
         sx = max(0, min(w - 1, int(path[0][0])))
         sy = max(0, min(h - 1, int(path[0][1])))
         lum = int(gray[sy, sx])
         path_sal = _path_saliency(path, saliency_norm, w, h)
+        
+        # Distance to face center
+        dist = np.sqrt((sx - fc[0])**2 + (sy - fc[1])**2)
 
         if path_sal < 0.10:
-            if len(path) < 12:
+            if len(path) < 15:
                 continue
             tone = random.randint(180, 220)
             line_w = 1
@@ -241,7 +317,7 @@ def draw(
             line_w = 1
         else:
             if lum < 40:
-                tone = random.randint(2, 10)  # Darker lines
+                tone = random.randint(2, 10)
                 line_w = 3
             elif lum < 90:
                 tone = random.randint(5, 20)
@@ -253,24 +329,30 @@ def draw(
                 tone = random.randint(40, 85)
                 line_w = 1
 
-        # Only add jitter to background elements; keep face/subject precise
-        pts = _jitter(path, jitter) if path_sal < 0.20 else path
-        
-        if len(pts) > 1:
-            for i in range(len(pts) - 1):
-                draw_layer.line([pts[i], pts[i + 1]], fill=(tone, tone, tone), width=line_w)
+        # Focal point detail: keep face lines dark, fade out lines far away (simplification)
+        if dist >= R:
+            tone = min(220, tone + 60) # soften background lines
+            line_w = 1
+
+        _draw_tapered_line(draw_layer, path, (tone, tone, tone, 255), line_w)
 
         if idx % eff_out == 0 or idx == n_out - 1:
-            # Yield with highlights preserved
-            canvas_copy = pil_canvas.copy()
-            copy_np = np.array(canvas_copy)
+            frame_img = paper_base.copy()
+            # Paste draft
+            frame_img.paste(draft_canvas, (0, 0), mask=draft_canvas.split()[3])
+            # Paste drawing
+            frame_img.paste(drawing_canvas, (0, 0), mask=drawing_canvas.split()[3])
+            
+            # Apply catchlight preservation
+            copy_np = np.array(frame_img)
             copy_np[highlight_mask > 0] = [255, 255, 255]
             yield Image.fromarray(copy_np)
 
-    # ── Step 2: Draw organic cross-contour hatching strokes ───────────────────
-    hatching_strokes = _generate_cross_contour_hatching(gray, saliency_norm, w, h)
+    # ── Step 2: Draw Hatching ─────────────────────────────────────────────────
+    hatching_strokes = _generate_cross_contour_hatching(gray, saliency_norm, w, h, hatching, fc, R)
     n_hatch = len(hatching_strokes)
-    eff_hatch = max(5, min(batch_size * 5, max(5, n_hatch // 100)))
+    target_hatch_frames = max(70, target_frames * 3 // 4)
+    eff_hatch = max(1, n_hatch // target_hatch_frames)
 
     for idx, (pt1, pt2, tone, lw, _) in enumerate(hatching_strokes):
         x1, y1 = pt1
@@ -278,16 +360,44 @@ def draw(
         mx = (x1 + x2) / 2 + random.uniform(-0.4, 0.4)
         my = (y1 + y2) / 2 + random.uniform(-0.4, 0.4)
         
-        draw_layer.line([pt1, (mx, my), pt2], fill=(tone, tone, tone), width=lw)
+        draw_layer.line([pt1, (mx, my), pt2], fill=(tone, tone, tone, 255), width=lw)
         
         if idx % eff_hatch == 0 or idx == n_hatch - 1:
-            canvas_copy = pil_canvas.copy()
-            copy_np = np.array(canvas_copy)
+            frame_img = paper_base.copy()
+            frame_img.paste(draft_canvas, (0, 0), mask=draft_canvas.split()[3])
+            frame_img.paste(drawing_canvas, (0, 0), mask=drawing_canvas.split()[3])
+            
+            copy_np = np.array(frame_img)
             copy_np[highlight_mask > 0] = [255, 255, 255]
             yield Image.fromarray(copy_np)
 
-    # Final yield with highlights
-    final_np = np.array(pil_canvas)
+    # ── Step 3: Eraser Phase (Progressively fade out structural draft layer) ──
+    eraser_steps = 15
+    for step in range(eraser_steps):
+        # Linearly fade draft opacity from 1.0 down to 0.0
+        opacity_factor = 1.0 - (step / float(eraser_steps))
+        
+        frame_img = paper_base.copy()
+        
+        # Modify draft opacity
+        draft_np = np.array(draft_canvas)
+        draft_np[:, :, 3] = (draft_np[:, :, 3].astype(np.float32) * opacity_factor).astype(np.uint8)
+        faded_draft = Image.fromarray(draft_np)
+        
+        frame_img.paste(faded_draft, (0, 0), mask=faded_draft.split()[3])
+        frame_img.paste(drawing_canvas, (0, 0), mask=drawing_canvas.split()[3])
+        
+        copy_np = np.array(frame_img)
+        copy_np[highlight_mask > 0] = [255, 255, 255]
+        yield Image.fromarray(copy_np)
+
+    # Final result (100% clean, guidelines completely erased)
+    final_img = paper_base.copy()
+    final_img.paste(drawing_canvas, (0, 0), mask=drawing_canvas.split()[3])
+    final_np = np.array(final_img)
     final_np[highlight_mask > 0] = [255, 255, 255]
     yield Image.fromarray(final_np)
-    pil_canvas.close()
+    
+    paper_base.close()
+    draft_canvas.close()
+    drawing_canvas.close()

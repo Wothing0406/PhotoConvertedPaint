@@ -70,7 +70,8 @@ def progressive_draw_generator(
     sketch_opacity: float = 0.12,
     line_art_width: int = 1,
     blending_radius: int = 25,
-    shadow_strength: float = 0.35
+    shadow_strength: float = 0.35,
+    **_kw
 ):
     """
     Main entry point called by app.py /api/draw-stream.
@@ -146,6 +147,7 @@ def progressive_draw_generator(
         sketch_opacity=sketch_opacity,
         line_art_width=line_art_width,
         shadow_strength=shadow_strength,
+        **_kw
     )
 
     # Video recording (optional)

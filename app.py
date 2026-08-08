@@ -2,7 +2,7 @@ import os
 import io
 import base64
 import uvicorn
-from fastapi import FastAPI, UploadFile, Form, HTTPException
+from fastapi import FastAPI, UploadFile, Form, HTTPException, Request
 from fastapi.responses import StreamingResponse, FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
@@ -200,6 +200,7 @@ def cleanup_old_files(max_age_seconds: int = 300):
 
 @app.post("/api/draw-stream")
 async def draw_stream(
+    request: Request,
     image: UploadFile,
     vibe: str = Form(...),
     remove_bg: bool = Form(True),
@@ -227,6 +228,16 @@ async def draw_stream(
     try:
         contents = await image.read()
         pil_img = Image.open(io.BytesIO(contents)).convert("RGB")
+        form_data = await request.form()
+        
+        # Parse all facial landmarks
+        landmarks = {}
+        for key in ["face_center_x", "face_center_y", "face_width", "face_height", "eye_left_x", "eye_left_y", "eye_right_x", "eye_right_y", "head_tilt_angle"]:
+            if key in form_data:
+                try:
+                    landmarks[key] = float(form_data[key])
+                except ValueError:
+                    pass
     except Exception as e:
         def error_generator():
             yield f"data: error:Failed to parse image: {str(e)}\n\n"
@@ -256,7 +267,8 @@ async def draw_stream(
                 wash_opacity=wash_opacity,
                 sketch_opacity=sketch_opacity,
                 line_art_width=line_art_width,
-                shadow_strength=shadow_strength
+                shadow_strength=shadow_strength,
+                **landmarks
             ):
                 if final_frame is not None:
                     final_frame.close()
