@@ -319,25 +319,24 @@ def draw(
         fill=guide_color, width=1
     )
 
-    # Soft charcoal smudging underpainting
+    # Soft charcoal smudging underpainting with original details
     shadow_strength = float(kw.get("shadow_strength", 0.35))
-    inverted_gray = 255 - gray
-    smudge_np = cv2.GaussianBlur(inverted_gray, (45, 45), 0)
+    gray_3ch = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
+    orig_smooth = cv2.bilateralFilter(gray_3ch, d=11, sigmaColor=50, sigmaSpace=50)
     
     # Calculate focal mask for face
     x_indices = np.arange(w)
     y_indices = np.arange(h)
     xs, ys = np.meshgrid(x_indices, y_indices)
     dists = np.sqrt((xs - fc[0])**2 + (ys - fc[1])**2)
-    focal_mask = np.clip(1.0 - (dists - R) / R, 0.0, 1.0)
-    focal_mask_blur = cv2.GaussianBlur(focal_mask, (21, 21), 0)
+    focal_mask = np.clip(1.0 - dists / R, 0.0, 1.0)
+    focal_mask_blur = cv2.GaussianBlur(focal_mask, (21, 21), 0)[:, :, np.newaxis]
     
-    # Soft face wash (factor 0.32), deep background/hair wash (factor 1.4)
-    smudge_factor = 1.4 * (1.0 - focal_mask_blur) + 0.32 * focal_mask_blur
-    smudge_np = np.clip(smudge_np.astype(np.float32) * (shadow_strength * smudge_factor), 0, 255).astype(np.uint8)
+    # Blended wash: face gets 60% detail/color wash, background gets 20%
+    wash_opacity = (0.20 * (1.0 - focal_mask_blur) + 0.60 * focal_mask_blur) * shadow_strength
+    wash_np = (255.0 * (1.0 - wash_opacity) + orig_smooth.astype(np.float32) * wash_opacity).astype(np.uint8)
     
-    paper_base_np = np.clip(255 - smudge_np, 0, 255).astype(np.uint8)
-    paper_base = Image.fromarray(cv2.cvtColor(paper_base_np, cv2.COLOR_GRAY2RGB)).convert("RGBA")
+    paper_base = Image.fromarray(wash_np).convert("RGBA")
 
     # ── Drawing Canvas ────────────────────────────────────────────────────────
     drawing_canvas = Image.new("RGBA", (w, h), (0, 0, 0, 0))

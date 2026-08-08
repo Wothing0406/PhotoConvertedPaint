@@ -326,18 +326,21 @@ def draw(
         pil_img.convert("RGB").filter(ImageFilter.GaussianBlur(radius=blur_r))
     ).astype(np.float32)
     
+    # Smooth original photo slightly for paint details
+    orig_smooth = cv2.bilateralFilter(img_np, d=11, sigmaColor=50, sigmaSpace=50)
+    
     # Calculate face focal mask
     x_indices = np.arange(w)
     y_indices = np.arange(h)
     xs, ys = np.meshgrid(x_indices, y_indices)
     dists = np.sqrt((xs - fc[0])**2 + (ys - fc[1])**2)
-    focal_mask = np.clip(1.0 - (dists - R) / R, 0.0, 1.0)
+    focal_mask = np.clip(1.0 - dists / R, 0.0, 1.0)
     focal_mask_blur = cv2.GaussianBlur(focal_mask, (21, 21), 0)
     focal_mask_blur_3d = np.expand_dims(focal_mask_blur, axis=2)
     
-    # Keep rich skin wash (72%) on face, soft background wash (35%)
-    wash_opacity = 0.35 * (1.0 - focal_mask_blur_3d) + 0.72 * focal_mask_blur_3d
-    wash_blended = np.clip(255.0 * (1.0 - wash_opacity) + washed * wash_opacity, 0, 255).astype(np.uint8)
+    # Blended wash: face gets 65% detail/color wash, background gets 25%
+    wash_opacity = 0.25 * (1.0 - focal_mask_blur_3d) + 0.65 * focal_mask_blur_3d
+    wash_blended = np.clip(255.0 * (1.0 - wash_opacity) + orig_smooth * wash_opacity, 0, 255).astype(np.uint8)
     
     paper_base = Image.fromarray(wash_blended).convert("RGBA")
     
