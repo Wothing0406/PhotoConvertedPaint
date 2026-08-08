@@ -7,6 +7,8 @@ Approach: TRUE master oil painting flow
   3. Pass 2: "Medium brushwork" — draw mid-sized strokes to add forms and structural values.
   4. Pass 3: "Fine details & highlights" — draw small strokes to refine details, eyes, edges.
   5. Pass 4: Apply 3D Impasto lighting and canvas texture to make the paint look thick and rich.
+  6. Pass 5: Detail Restoration on highly salient regions (face, eyes, text) using bilateral
+     detail blending to preserve high-fidelity portrait details.
 """
 
 import cv2
@@ -142,9 +144,9 @@ def draw(
                 
                 strokes.append((rx, ry, color, angle_deg, hl, hw, sal))
 
-        # Draw details first or center-out
+        # Paint fine details on subject first
         if pass_idx == 2:
-            strokes.sort(key=lambda s: s[6], reverse=True)  # Paint fine details on subject first
+            strokes.sort(key=lambda s: s[6], reverse=True)
         else:
             random.shuffle(strokes)
 
@@ -152,24 +154,34 @@ def draw(
         eff_s = max(1, min(batch_size, max(1, n_s // 80)))
 
         for idx, (rx, ry, color, angle_deg, hl, hw, _) in enumerate(strokes):
-            # RGB to BGR for OpenCV functions inside paint stroke
             color_bgr = (color[2], color[1], color[0])
             _paint_stroke_soft(canvas_np, heightmap_np, rx, ry, color_bgr, angle_deg, hl, hw, pass_opacity)
             
             if idx % eff_s == 0 or idx == n_s - 1:
-                # Convert back to RGB to yield frame
                 yield Image.fromarray(cv2.cvtColor(canvas_np, cv2.COLOR_BGR2RGB))
 
     # ── Pass 4: Apply 3D Impasto paint height lighting ───────────────────────
     final_rgb = cv2.cvtColor(canvas_np, cv2.COLOR_BGR2RGB)
     shaded_np = _apply_impasto_lighting(final_rgb, heightmap_np, intensity=35.0)
 
+    # ── Pass 5: Detail Restoration on highly salient regions ─────────────────
+    if saliency_norm is not None:
+        # Create a smooth blending mask for salient regions (face/eyes/hands)
+        detail_mask = np.clip((saliency_norm - 0.35) / 0.30, 0.0, 1.0)
+        detail_mask = cv2.GaussianBlur(detail_mask, (15, 15), 0)[:, :, np.newaxis]
+        
+        # Smooth bilateral details of original
+        orig_smooth = cv2.bilateralFilter(img_np, d=9, sigmaColor=50, sigmaSpace=50)
+        
+        # Blend original details back on salient regions to preserve high-fidelity portrait features
+        shaded_np = (shaded_np.astype(np.float32) * (1.0 - detail_mask * 0.70) + 
+                     orig_smooth.astype(np.float32) * (detail_mask * 0.70)).astype(np.uint8)
+
     # Blend soft canvas texture at the end
     try:
         tex = gpu_canvas_texture(w, h)
         shaded_f = shaded_np.astype(np.float32) / 255.0
         tex_f = tex.astype(np.float32)[:, :, np.newaxis] / 255.0
-        # Soft-light blend
         blended = gpu_soft_light(shaded_f, np.repeat(tex_f, 3, axis=2))
         final_img = Image.fromarray((np.clip(blended, 0.0, 1.0) * 255).astype(np.uint8))
         yield final_img.copy()
