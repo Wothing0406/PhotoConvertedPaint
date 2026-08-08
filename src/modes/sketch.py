@@ -172,7 +172,7 @@ def _draw_tapered_line(draw_layer, pts, base_tone, base_width):
         draw_layer.line([pts[i], pts[i+1]], fill=(tone_val, tone_val, tone_val, 255), width=int(round(w)))
 
 
-def _generate_cross_contour_hatching(gray, saliency_norm, w, h, hatching_intensity, fc, R):
+def _generate_cross_contour_hatching(gray, saliency_norm, w, h, hatching_intensity, fc, R, shading_flow_angle=45.0, bg_hatching_angle=135.0):
     strokes = []
     spacing = max(12, min(w, h) // 80)
     
@@ -220,16 +220,23 @@ def _generate_cross_contour_hatching(gray, saliency_norm, w, h, hatching_intensi
                     tone = random.randint(50, 110)
                     lw = 1
 
+            # Get base structural angles (in degrees)
+            base_shading_deg = float(shading_flow_angle)
+            base_bg_deg = float(bg_hatching_angle)
+            base_angle = np.radians(base_shading_deg if dist < R else base_bg_deg)
+            
             dx = sobelx[y, x]
             dy = sobely[y, x]
             mag = np.sqrt(dx**2 + dy**2)
             
             if mag > 5.0:
-                angle = np.arctan2(dy, dx) + np.pi / 2.0
+                local_angle = np.arctan2(dy, dx) + np.pi / 2.0
+                # Blend: 40% local geometry, 60% global aesthetic structure
+                angle = 0.40 * local_angle + 0.60 * base_angle
             else:
-                angle = np.radians(45.0)
+                angle = base_angle
                 
-            angle += np.radians(random.uniform(-8, 8))
+            angle += np.radians(random.uniform(-6, 6))
             
             if lum < 60:
                 L = random.uniform(30, 45)
@@ -365,7 +372,9 @@ def draw(
             main_outlines.append(path)
 
     # Hatching splits
-    all_hatching = _generate_cross_contour_hatching(gray, saliency_norm, w, h, hatching, fc, R)
+    shading_angle = float(kw.get("shading_flow_angle", 45.0))
+    bg_angle = float(kw.get("bg_hatching_angle", 135.0))
+    all_hatching = _generate_cross_contour_hatching(gray, saliency_norm, w, h, hatching, fc, R, shading_angle, bg_angle)
     dark_hatching = [h for h in all_hatching if h[5] < 85]
     midtone_hatching = [h for h in all_hatching if h[5] >= 85]
 

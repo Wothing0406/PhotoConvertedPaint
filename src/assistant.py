@@ -5,7 +5,8 @@ Two modes:
   1. Default params (always available, instant): well-tuned per-style defaults.
   2. Gemini Vision (optional, when API key works): real image analysis using the model.
      Integrates semantic facial landmark detection (landmarks, axis, head tilt)
-     to guide the structural draft layer and define the visual focal point.
+     and global artistic direction (lighting angle, face shading flow, background angle)
+     to guide the structural draft layer and define the visual hatching flow.
 """
 
 import os
@@ -42,7 +43,12 @@ class DrawingParams(BaseModel):
     eye_right_y: float = Field(description="Fractional right eye Y coordinate (0.0 to 1.0).")
     head_tilt_angle: float = Field(description="Angle of head tilt in degrees (-45.0 to 45.0). Positive means tilted right, negative left.")
     
-    explanation: str = Field(description="Description of the subject detected and rationale for landmarks.")
+    # ── Global Artistic Shading Directions ───────────────────────────────────
+    primary_lighting_angle: float = Field(description="Angle of the main light source in degrees (0 to 360). 0 means right, 90 top, 180 left, 270 bottom. Default 45.")
+    shading_flow_angle: float = Field(description="Ideal base angle of shading lines/hatching in degrees (0 to 360) for rendering subject forms. Default 45.")
+    bg_hatching_angle: float = Field(description="Ideal angle of background/sky hatching in degrees (0 to 360) to contrast the subject. Default 135.")
+    
+    explanation: str = Field(description="Description of the subject detected, lighting direction, and structural shading plan.")
 
 
 def is_api_available() -> bool:
@@ -78,7 +84,8 @@ _DEFAULTS = {
         "shadow_strength": 0.0, "image_subject": "portrait_human",
         "face_center_x": 0.5, "face_center_y": 0.4, "face_width": 0.3, "face_height": 0.45,
         "eye_left_x": 0.43, "eye_left_y": 0.38, "eye_right_x": 0.57, "eye_right_y": 0.38,
-        "head_tilt_angle": 0.0,
+        "head_tilt_angle": 0.0, "primary_lighting_angle": 45.0, "shading_flow_angle": 45.0,
+        "bg_hatching_angle": 135.0,
         "explanation": "Anime: bilateral-smoothed Canny, clean sparse outlines, no wash."
     },
     "Realistic Sketch": {
@@ -88,7 +95,8 @@ _DEFAULTS = {
         "shadow_strength": 0.35, "image_subject": "portrait_human",
         "face_center_x": 0.5, "face_center_y": 0.4, "face_width": 0.3, "face_height": 0.45,
         "eye_left_x": 0.43, "eye_left_y": 0.38, "eye_right_x": 0.57, "eye_right_y": 0.38,
-        "head_tilt_angle": 0.0,
+        "head_tilt_angle": 0.0, "primary_lighting_angle": 45.0, "shading_flow_angle": 45.0,
+        "bg_hatching_angle": 135.0,
         "explanation": "Realistic Sketch: thin tonal charcoal strokes on warm paper."
     },
     "Colored Pencil Sketch": {
@@ -98,7 +106,8 @@ _DEFAULTS = {
         "shadow_strength": 0.0, "image_subject": "portrait_human",
         "face_center_x": 0.5, "face_center_y": 0.4, "face_width": 0.3, "face_height": 0.45,
         "eye_left_x": 0.43, "eye_left_y": 0.38, "eye_right_x": 0.57, "eye_right_y": 0.38,
-        "head_tilt_angle": 0.0,
+        "head_tilt_angle": 0.0, "primary_lighting_angle": 45.0, "shading_flow_angle": 45.0,
+        "bg_hatching_angle": 135.0,
         "explanation": "Colored Pencil: color-sampled strokes with soft wash underpainting."
     },
     "Oil Painting": {
@@ -108,7 +117,8 @@ _DEFAULTS = {
         "shadow_strength": 0.0, "image_subject": "portrait_human",
         "face_center_x": 0.5, "face_center_y": 0.4, "face_width": 0.3, "face_height": 0.45,
         "eye_left_x": 0.43, "eye_left_y": 0.38, "eye_right_x": 0.57, "eye_right_y": 0.38,
-        "head_tilt_angle": 0.0,
+        "head_tilt_angle": 0.0, "primary_lighting_angle": 45.0, "shading_flow_angle": 45.0,
+        "bg_hatching_angle": 135.0,
         "explanation": "Oil Painting: directional impasto brush strokes, canvas background."
     },
     "Paint-by-Numbers Blueprint": {
@@ -118,7 +128,8 @@ _DEFAULTS = {
         "shadow_strength": 0.0, "image_subject": "portrait_human",
         "face_center_x": 0.5, "face_center_y": 0.4, "face_width": 0.3, "face_height": 0.45,
         "eye_left_x": 0.43, "eye_left_y": 0.38, "eye_right_x": 0.57, "eye_right_y": 0.38,
-        "head_tilt_angle": 0.0,
+        "head_tilt_angle": 0.0, "primary_lighting_angle": 45.0, "shading_flow_angle": 45.0,
+        "bg_hatching_angle": 135.0,
         "explanation": "Paint-by-Numbers: flat color fills, numbered regions, clean borders."
     },
 }
@@ -147,7 +158,7 @@ def get_optimized_parameters(
     model = GEMINI_MODEL
 
     prompt = (
-        f"You are a master artist analyzing an image to extract high-level semantic context and facial landmarks for a '{vibe_style}' drawing process.\n"
+        f"You are a master artist analyzing an image to extract high-level semantic context, facial landmarks, and light direction for a '{vibe_style}' drawing process.\n"
         f"\n"
         f"DIRECTIONS:\n"
         f"1. Detect the main subject type: 'portrait_human', 'animal_pet', 'landscape_nature', or 'object_still_life'.\n"
@@ -156,6 +167,10 @@ def get_optimized_parameters(
         f"   - face_width, face_height: width and height of the face bounding box.\n"
         f"   - eye_left_x, eye_left_y, eye_right_x, eye_right_y: the coordinates of the eyes.\n"
         f"   - head_tilt_angle: angle of head tilt in degrees (-45.0 to 45.0). Positive = tilted right, negative = tilted left.\n"
+        f"3. Analyze light source direction and geometry to plan the global artistic shading flow:\n"
+        f"   - primary_lighting_angle: angle of main light in degrees (0 to 360). 0=right, 90=top, 180=left, 270=bottom.\n"
+        f"   - shading_flow_angle: ideal angle in degrees (0 to 360) for rendering anatomical shadows (e.g. aligned with cheeks or nose structure).\n"
+        f"   - bg_hatching_angle: ideal angle in degrees (0 to 360) for background scenery lines (often horizontal or diagonal to complement subject).\n"
         f"Return the exact fields defined in the schema."
     )
 
@@ -194,11 +209,12 @@ def get_optimized_parameters(
             thumb.close()
             p = json.loads(response.text)
 
-            # Copy all landmark fields directly into the defaults dictionary
+            # Copy all fields directly into the defaults dictionary
             for field in [
                 "face_center_x", "face_center_y", "face_width", "face_height",
                 "eye_left_x", "eye_left_y", "eye_right_x", "eye_right_y",
-                "head_tilt_angle", "image_subject"
+                "head_tilt_angle", "primary_lighting_angle", "shading_flow_angle",
+                "bg_hatching_angle", "image_subject"
             ]:
                 if field in p:
                     defaults[field] = p[field]
