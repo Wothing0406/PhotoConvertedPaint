@@ -1,20 +1,14 @@
 """
 modes/pencil.py — Colored Pencil Sketch
 ========================================
-Approach: MASTER progressive colored pencil technique
-  1. Start with a pure white paper canvas.
-  2. Single-line outline extraction:
-     - Hessian Ridge Detection + XDoG/Canny boundaries.
-     - Thin borders with a 9x9 dilation merge to completely avoid double outlines.
-     - Smooth coordinates using moving average.
-     - No jitter on subject details (sal > 0.20) to prevent distortion.
-  3. Cross-Contour Hatching:
-     - Short, wiggled color-sampled strokes oriented along the local contour tangents.
-     - Deep shadows get saturated dark colored strokes (low stroke factor).
-     - Skin highlights (sal > 0.45, lum > 140) remain clean white.
-  4. Eye Catchlight Protection:
-     - Highlight spots from original image remain pure white.
-  5. Fade in soft color wash underpainting & blend linen paper texture.
+Approach: MASTER progressive colored pencil technique with target-frame scaling
+  1. Start with a soft, light color wash base (warm tinted paper, 40% opacity) from Frame 1.
+     This ensures the drawing is colorful and vibrant throughout the entire animation.
+  2. Single-line outline extraction (Hessian ridges + thinned borders, smooth, no face jitter).
+  3. Draw outlines using high-saturation, recognizable colored pencil tones (hue-preserving dark colors).
+  4. Draw cross-contour hatching strokes in color-preserved sampled tones (tangent-aligned).
+  5. Eye Catchlight Protection: highlights remain 100% white.
+  6. Apply linen paper grain texture.
 """
 
 import cv2
@@ -82,10 +76,9 @@ def _build_contour_paths(gray, saliency_norm, clo, chi, min_path_len=8):
     ridges = np.zeros_like(gray, dtype=np.uint8)
     ridges[val > 5.0] = 255
 
-    # 2. Canny Boundaries
+    # 2. Boundaries
     edges = cv2.Canny(gray, clo, chi)
     
-    # 9x9 dilation merge to completely avoid double outlines
     merge_k = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9))
     merged = cv2.dilate(edges, merge_k, iterations=1)
     
@@ -109,7 +102,7 @@ def _build_contour_paths(gray, saliency_norm, clo, chi, min_path_len=8):
 
 def _generate_color_cross_contour_hatching(img_rgb, gray, saliency_norm, w, h):
     strokes = []
-    spacing = max(6, min(w, h) // 90)
+    spacing = max(6, min(w, h) // 95)
     
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
     sobelx = cv2.Sobel(blurred, cv2.CV_32F, 1, 0, ksize=3)
@@ -125,13 +118,11 @@ def _generate_color_cross_contour_hatching(img_rgb, gray, saliency_norm, w, h):
             if lum >= 205:
                 continue
                 
-            # Skin protection
             if sal > 0.45 and lum > 140:
                 continue
                 
             c_sampled = img_rgb[y, x].astype(np.float32)
             
-            # Compute tangent direction
             dx = sobelx[y, x]
             dy = sobely[y, x]
             mag = np.sqrt(dx**2 + dy**2)
@@ -159,7 +150,7 @@ def _generate_color_cross_contour_hatching(img_rgb, gray, saliency_norm, w, h):
                 y2 = y + sin_a * L / 2.0 + random.uniform(-0.5, 0.5)
                 
                 if lum < 50:
-                    stroke_factor = 0.05 + random.uniform(0, 0.04)  # Very dark colors
+                    stroke_factor = 0.05 + random.uniform(0, 0.03)
                     lw = 2
                 elif lum < 100:
                     stroke_factor = 0.12 + random.uniform(0, 0.06)
@@ -167,8 +158,10 @@ def _generate_color_cross_contour_hatching(img_rgb, gray, saliency_norm, w, h):
                 else:
                     stroke_factor = 0.32 + random.uniform(0, 0.10)
                     lw = 1
-                    
-                stroke_rgb = tuple(max(3, int(c * stroke_factor)) for c in c_sampled)
+                
+                # Blend color with dark gray instead of black to preserve rich colored pencil hues
+                factor = 0.35 + 0.62 * stroke_factor
+                stroke_rgb = tuple(max(5, int(c * factor)) for c in c_sampled)
                 strokes.append(((x1, y1), (x2, y2), stroke_rgb, lw, y))
                 
     strokes.sort(key=lambda s: s[4] + random.uniform(-30, 30))
@@ -204,24 +197,35 @@ def draw(
     gray = cv2.bilateralFilter(gray_raw, 7, 30, 30)
     saliency_norm = gpu_saliency(gray_raw)
 
-    # Detect original highlights (catchlights) to preserve
     highlight_mask = (gray_raw > 225) & (saliency_norm > 0.35)
     highlight_mask = cv2.dilate(highlight_mask.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
 
-    # ── Canvas starts as pure white paper ─────────────────────────────────────
-    canvas = Image.new("RGBA", (w, h), (255, 255, 255, 255))
+    # Calculate dynamic target frames
+    bs = max(5, min(50, batch_size))
+    target_frames = int(1600 - (bs - 5) * (1300 / 45))
+    target_frames = max(200, min(1600, target_frames))
+
+    # ── Canvas starts with a soft color wash base for a warm tinted ground ──
+    blur_r = max(20, min(w, h) // 5)
+    washed = np.array(
+        pil_img.convert("RGB").filter(ImageFilter.GaussianBlur(radius=blur_r))
+    ).astype(np.float32)
+    # 40% opacity wash + 60% pure white paper background
+    wash_blended = np.clip(255.0 * 0.60 + washed * 0.40, 0, 255).astype(np.uint8)
+    canvas = Image.fromarray(wash_blended).convert("RGBA")
     yield canvas.copy()
 
     # ── Step 1: Draw outline paths progressively ──────────────────────────────
     clo = max(15, 60 - threshold_c * 5)
     chi = max(45, 140 - threshold_c * 8)
     paths = _build_contour_paths(gray, saliency_norm, clo, chi, min_path_len=8)
-
     paths.sort(key=lambda p: _path_saliency(p, saliency_norm, w, h), reverse=True)
 
     draw_layer = ImageDraw.Draw(canvas)
     n_out = len(paths)
-    eff_out = max(1, min(batch_size, max(1, n_out // 120)))
+    
+    target_out_frames = max(30, target_frames // 4)
+    eff_out = max(1, n_out // target_out_frames)
 
     for idx, path in enumerate(paths):
         sx = max(0, min(w - 1, int(path[0][0])))
@@ -235,12 +239,9 @@ def draw(
                 continue
             stroke_factor = 0.80 + random.uniform(0, 0.15)
             line_w = 1
-        elif path_sal < 0.28:
-            stroke_factor = 0.58 + random.uniform(0, 0.10)
-            line_w = 1
         else:
             if lum < 40:
-                stroke_factor = 0.05 + random.uniform(0, 0.03)  # Rich dark outlines
+                stroke_factor = 0.05 + random.uniform(0, 0.03)
                 line_w = 3
             elif lum < 80:
                 stroke_factor = 0.10 + random.uniform(0, 0.04)
@@ -255,9 +256,9 @@ def draw(
                 stroke_factor = 0.50 + random.uniform(0, 0.10)
                 line_w = 1
 
-        stroke_rgb = tuple(max(3, int(c * stroke_factor)) for c in c_sampled)
-
-        # Only add jitter to background elements; keep face/subject precise
+        # Preserve color vibrancy by avoiding extreme black multiplication
+        factor = 0.35 + 0.62 * stroke_factor
+        stroke_rgb = tuple(max(5, int(c * factor)) for c in c_sampled)
         pts = _jitter(path, jitter) if path_sal < 0.20 else path
         
         if len(pts) > 1:
@@ -273,7 +274,9 @@ def draw(
     # ── Step 2: Draw color cross-contour hatching strokes ─────────────────────
     hatching_strokes = _generate_color_cross_contour_hatching(img_np, gray, saliency_norm, w, h)
     n_hatch = len(hatching_strokes)
-    eff_hatch = max(5, min(batch_size * 5, max(5, n_hatch // 100)))
+    
+    target_hatch_frames = max(70, target_frames * 3 // 4)
+    eff_hatch = max(1, n_hatch // target_hatch_frames)
 
     for idx, (pt1, pt2, stroke_rgb, lw, _) in enumerate(hatching_strokes):
         x1, y1 = pt1
@@ -289,28 +292,12 @@ def draw(
             copy_np[highlight_mask > 0] = [255, 255, 255, 255]
             yield Image.fromarray(copy_np).convert("RGBA")
 
-    # ── Step 3: Fade in color wash base under outlines at the end ─────────────
-    # Make sure highlight catchlights are completely preserved on lines
+    # Final Step: Blend paper texture on top
     canvas_np = np.array(canvas)
     canvas_np[highlight_mask > 0] = [255, 255, 255, 255]
-    lines_np = canvas_np[:, :, :3]
-
-    blur_r = max(20, min(w, h) // 5)
-    washed = np.array(
-        pil_img.convert("RGB").filter(ImageFilter.GaussianBlur(radius=blur_r))
-    ).astype(np.float32)
-    wash_blended = np.clip(255.0 * 0.60 + washed * 0.40, 0, 255).astype(np.uint8)
-
-    steps = 15
-    for step in range(1, steps + 1):
-        alpha = step / float(steps)
-        base_color = cv2.addWeighted(np.full((h, w, 3), 255, dtype=np.uint8), 1.0 - alpha, wash_blended, alpha, 0)
-        blended = np.clip((base_color.astype(np.float32) / 255.0) * (lines_np.astype(np.float32) / 255.0) * 255.0, 0, 255).astype(np.uint8)
-        yield Image.fromarray(blended).convert("RGBA")
-
-    # Final Step: Paper texture
+    final_canvas = Image.fromarray(canvas_np)
+    
     try:
-        final_canvas = Image.fromarray(blended).convert("RGBA")
         canvas_tex = gpu_canvas_texture(w, h)
         canvas_rgb = np.array(final_canvas.convert("RGB")).astype(np.float32) / 255.0
         tex_f = canvas_tex.astype(np.float32)[:, :, np.newaxis] / 255.0
@@ -321,6 +308,6 @@ def draw(
         final_canvas.close()
     except Exception as te:
         print(f"[pencil] Paper texture blend failed: {te}")
-        yield Image.fromarray(blended).convert("RGBA")
+        yield final_canvas.copy()
 
     canvas.close()
