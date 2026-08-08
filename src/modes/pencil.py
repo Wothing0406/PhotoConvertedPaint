@@ -325,7 +325,19 @@ def draw(
     washed = np.array(
         pil_img.convert("RGB").filter(ImageFilter.GaussianBlur(radius=blur_r))
     ).astype(np.float32)
-    wash_blended = np.clip(255.0 * 0.40 + washed * 0.60, 0, 255).astype(np.uint8)
+    
+    # Calculate face focal mask
+    x_indices = np.arange(w)
+    y_indices = np.arange(h)
+    xs, ys = np.meshgrid(x_indices, y_indices)
+    dists = np.sqrt((xs - fc[0])**2 + (ys - fc[1])**2)
+    focal_mask = np.clip(1.0 - (dists - R) / R, 0.0, 1.0)
+    focal_mask_blur = cv2.GaussianBlur(focal_mask, (21, 21), 0)
+    focal_mask_blur_3d = np.expand_dims(focal_mask_blur, axis=2)
+    
+    # Keep rich skin wash (72%) on face, soft background wash (35%)
+    wash_opacity = 0.35 * (1.0 - focal_mask_blur_3d) + 0.72 * focal_mask_blur_3d
+    wash_blended = np.clip(255.0 * (1.0 - wash_opacity) + washed * wash_opacity, 0, 255).astype(np.uint8)
     
     paper_base = Image.fromarray(wash_blended).convert("RGBA")
     

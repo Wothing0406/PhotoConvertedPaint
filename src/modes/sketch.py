@@ -323,7 +323,18 @@ def draw(
     shadow_strength = float(kw.get("shadow_strength", 0.35))
     inverted_gray = 255 - gray
     smudge_np = cv2.GaussianBlur(inverted_gray, (45, 45), 0)
-    smudge_np = np.clip(smudge_np.astype(np.float32) * (shadow_strength * 0.40), 0, 255).astype(np.uint8)
+    
+    # Calculate focal mask for face
+    x_indices = np.arange(w)
+    y_indices = np.arange(h)
+    xs, ys = np.meshgrid(x_indices, y_indices)
+    dists = np.sqrt((xs - fc[0])**2 + (ys - fc[1])**2)
+    focal_mask = np.clip(1.0 - (dists - R) / R, 0.0, 1.0)
+    focal_mask_blur = cv2.GaussianBlur(focal_mask, (21, 21), 0)
+    
+    # Soft face wash (factor 0.32), deep background/hair wash (factor 1.4)
+    smudge_factor = 1.4 * (1.0 - focal_mask_blur) + 0.32 * focal_mask_blur
+    smudge_np = np.clip(smudge_np.astype(np.float32) * (shadow_strength * smudge_factor), 0, 255).astype(np.uint8)
     
     paper_base_np = np.clip(255 - smudge_np, 0, 255).astype(np.uint8)
     paper_base = Image.fromarray(cv2.cvtColor(paper_base_np, cv2.COLOR_GRAY2RGB)).convert("RGBA")
