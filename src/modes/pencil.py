@@ -135,8 +135,7 @@ def _build_contour_paths(gray, saliency_norm, clo, chi, fc, R):
             path = [tuple(pt[0]) for pt in approx]
             mx, my = path[len(path)//2]
             dist = np.sqrt((mx - fc[0])**2 + (my - fc[1])**2)
-            
-            min_len = 6 if dist < R else 18
+            min_len = 6 if dist < R else 10
             if p < min_len:
                 continue
                 

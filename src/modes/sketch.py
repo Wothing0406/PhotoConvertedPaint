@@ -140,7 +140,7 @@ def _build_contour_paths(gray, saliency_norm, clo, chi, fc, R):
             mx, my = path[len(path)//2]
             dist = np.sqrt((mx - fc[0])**2 + (my - fc[1])**2)
             
-            min_len = 6 if dist < R else 18 # raise background line length threshold to drop noisy bits
+            min_len = 6 if dist < R else 10 # raise background line length threshold to drop only tiny noise
             if p < min_len:
                 continue
                 
