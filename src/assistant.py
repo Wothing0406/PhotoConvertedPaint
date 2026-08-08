@@ -29,16 +29,6 @@ except ImportError:
 
 
 class DrawingParams(BaseModel):
-    blur_size: int = Field(description="Gaussian blur radius, ODD integer 1-21.")
-    threshold_block: int = Field(description="Adaptive threshold block size, ODD integer 3-51.")
-    threshold_c: int = Field(description="Canny threshold control 1-20. Higher = fewer lines.")
-    jitter: float = Field(description="Hand-drawn jitter 0.0-1.5. 0.1=precise, 0.5=natural.")
-    hatching: float = Field(description="Shadow hatching 0.0-0.3. Use 0.0 for all except Realistic Sketch.")
-    bg_color_wash: bool = Field(description="Color underpainting layer.")
-    wash_opacity: int = Field(description="Underpainting opacity 0-150.")
-    sketch_opacity: float = Field(description="Faint guideline opacity 0.0-0.25.")
-    line_art_width: int = Field(description="Stroke width: 1=pencil, 2=anime, 3=manga.")
-    shadow_strength: float = Field(description="Intensity of shadow composite (0.0 to 0.5).")
     image_subject: str = Field(description="Detected category of the image. Must be one of: 'portrait_human', 'animal_pet', 'landscape_nature', 'object_still_life'.")
     
     # ── Semantic Landmark Fields to guide drawing loops ─────────────────────
@@ -52,7 +42,7 @@ class DrawingParams(BaseModel):
     eye_right_y: float = Field(description="Fractional right eye Y coordinate (0.0 to 1.0).")
     head_tilt_angle: float = Field(description="Angle of head tilt in degrees (-45.0 to 45.0). Positive means tilted right, negative left.")
     
-    explanation: str = Field(description="Why these values were chosen. Start with '[Subject Type detected]' followed by rationale.")
+    explanation: str = Field(description="Description of the subject detected and rationale for landmarks.")
 
 
 def is_api_available() -> bool:
@@ -156,30 +146,16 @@ def get_optimized_parameters(
 
     model = GEMINI_MODEL
 
-    style_rules = {
-        "Anime Outline":
-            "Anime: Clean, smooth, and simplified cartoon line-art. Ensure threshold_c=8-15 to keep outlines clean. Hatching=0, shadow_strength=0.0, bg_color_wash=false, line_art_width=2.",
-        "Realistic Sketch":
-            "Realistic Sketch: Soft tonal drawing with fine details. Use blur_size=3-5. If background is complex, use threshold_c=6-11. Otherwise, use threshold_c=3-6. Shadow_strength should be 0.18-0.35.",
-        "Colored Pencil Sketch":
-            "Colored Pencil: Color-sampled lines with pencil texture and a warm underpainting wash. Use threshold_c=2-5. Keep wash_opacity=65-110. Hatching=0, shadow_strength=0.0, line_art_width=1.",
-        "Oil Painting":
-            "Oil Painting: Bold painterly brushstrokes. Use blur_size=7-13, jitter=0.5-0.9. Hatching=0, shadow_strength=0.0, bg_color_wash=false.",
-        "Paint-by-Numbers Blueprint":
-            "Paint-by-Numbers: Outlined color-regions. Set threshold_c=3-6, line_art_width=1, bg_color_wash=false, hatching=0, shadow_strength=0.0.",
-    }.get(vibe_style, "")
-
     prompt = (
-        f"You are a master artist analyzing an image to prepare optimal drawing parameters and facial landmarks for a '{vibe_style}' drawing process.\n"
+        f"You are a master artist analyzing an image to extract high-level semantic context and facial landmarks for a '{vibe_style}' drawing process.\n"
         f"\n"
         f"DIRECTIONS:\n"
-        f"1. Detect the main subject: 'portrait_human', 'animal_pet', 'landscape_nature', or 'object_still_life'.\n"
-        f"2. If it is a portrait (human or animal), identify the landmarks as fractions of the image dimensions (0.0 to 1.0):\n"
-        f"   - face_center_x, face_center_y: the coordinate of the center of the face.\n"
+        f"1. Detect the main subject type: 'portrait_human', 'animal_pet', 'landscape_nature', or 'object_still_life'.\n"
+        f"2. If it is a portrait (human or animal), identify key facial coordinates as fractions of the image dimensions (0.0 to 1.0):\n"
+        f"   - face_center_x, face_center_y: coordinate of the center of the face.\n"
         f"   - face_width, face_height: width and height of the face bounding box.\n"
         f"   - eye_left_x, eye_left_y, eye_right_x, eye_right_y: the coordinates of the eyes.\n"
-        f"   - head_tilt_angle: the angle in degrees (-45.0 to 45.0) that the head is tilted.\n"
-        f"3. Apply specific style instructions: {style_rules}\n"
+        f"   - head_tilt_angle: angle of head tilt in degrees (-45.0 to 45.0). Positive = tilted right, negative = tilted left.\n"
         f"Return the exact fields defined in the schema."
     )
 
@@ -218,29 +194,20 @@ def get_optimized_parameters(
             thumb.close()
             p = json.loads(response.text)
 
-            for f in ("blur_size", "threshold_block"):
-                v = int(p.get(f, 5))
-                p[f] = v if v % 2 == 1 else max(1, v - 1)
+            # Copy all landmark fields directly into the defaults dictionary
+            for field in [
+                "face_center_x", "face_center_y", "face_width", "face_height",
+                "eye_left_x", "eye_left_y", "eye_right_x", "eye_right_y",
+                "head_tilt_angle", "image_subject"
+            ]:
+                if field in p:
+                    defaults[field] = p[field]
 
-            p["hatching"] = max(0.0, min(0.3, float(p.get("hatching", 0.0))))
-            p["shadow_strength"] = max(0.0, min(0.5, float(p.get("shadow_strength", 0.35))))
-            
             subj = p.get("image_subject", "portrait_human")
-            if subj == "landscape_nature":
-                p["shadow_strength"] = min(0.12, p["shadow_strength"])
-            elif subj == "animal_pet":
-                p["shadow_strength"] = min(0.28, max(0.12, p["shadow_strength"]))
-                p["blur_size"] = min(5, p["blur_size"])
-
-            if vibe_style in ("Anime Outline", "Oil Painting", "Paint-by-Numbers Blueprint"):
-                p["hatching"] = 0.0
-                p["bg_color_wash"] = False
-                p["shadow_strength"] = 0.0
-
             tag = f"Gemini ({model}, {subj})"
-            p["explanation"] = f"{tag}: {str(p.get('explanation', ''))[:120]}"
-            print(f"[Gemini] OK: {p['explanation'][:80]}")
-            return p
+            defaults["explanation"] = f"{tag}: {str(p.get('explanation', ''))[:120]}"
+            print(f"[Gemini] OK: {defaults['explanation'][:80]}")
+            return defaults
 
         except Exception as e:
             err = str(e)

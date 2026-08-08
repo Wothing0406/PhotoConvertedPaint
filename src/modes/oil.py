@@ -1,20 +1,25 @@
 """
-modes/oil.py — Oil Painting
-============================
-Approach: TRUE master oil painting flow
-  1. Start with a rough, light gray canvas (gesso texture ground).
-  2. Pass 1: "Blocking In" — progressively draw large block strokes to define colors and shapes.
-  3. Pass 2: "Medium brushwork" — draw mid-sized strokes to add forms and structural values.
-  4. Pass 3: "Fine details & highlights" — draw small strokes to refine details, eyes, edges.
-  5. Pass 4: Apply 3D Impasto lighting and canvas texture to make the paint look thick and rich.
-  6. Pass 5: Detail Restoration on highly salient regions (face, eyes, text) using bilateral
-     detail blending to preserve high-fidelity portrait details.
+modes/oil.py — Oil Painting (5-Layer Progressive Drawing)
+==========================================================
+Approach: TRUE master oil painting flow in 5 sequential stages
+  - Layer 1: Structural Draft (Phác thảo cấu trúc):
+    * Faint layout sketch lines (oval, axes, eyes) based on Gemini landmarks.
+  - Layer 2: Blocking In (Tô màu khối lớn):
+    * Large block strokes to define colors and shapes.
+  - Layer 3: Medium Brushwork (Nét cọ trung):
+    * Mid-sized strokes to add forms and structural values.
+  - Layer 4: Fine Details & Highlights (Tả chi tiết ngũ quan):
+    * Small, precise strokes focused on the face and details.
+    * Blending original details back in portrait regions.
+  - Layer 5: Eraser Phase & Impasto (Xoá nét nháp & Tạo nổi 3D):
+    * Progressively fade out structural sketch guidelines.
+    * Apply 3D Impasto shading and linen texture.
 """
 
 import cv2
 import numpy as np
 import random
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from src.gpu_utils import (
     gpu_saliency,
@@ -49,7 +54,6 @@ def _paint_stroke_soft(canvas_np, heightmap_np, cx, cy, color_bgr, angle_deg, hl
     stroke_color = np.array([b, g, r_val], dtype=np.float32)
     mask_f = (stroke_mask.astype(np.float32) / 255.0) * opacity
     
-    # Accumulate height for 3D impasto
     local_height[:] = np.maximum(local_height, mask_f * 255.0)
     
     mask_f_3d = np.expand_dims(mask_f, axis=2)
@@ -94,15 +98,54 @@ def draw(
     blur_size: int = 7,
     jitter: float = 0.65,
     batch_size: int = 20,
-    **_kw,
+    **kw,
 ):
     w, h   = pil_img.size
     img_np = _boost_saturation(np.array(pil_img.convert("RGB")), 1.25)
     heightmap_np = np.zeros((h, w), dtype=np.float32)
 
-    # ── Step 1: Canvas starts as gesso gray textured ground ──────────────────
+    # ── Parse Gemini landmarks ───────────────────────────────────────────────
+    face_cx = float(kw.get("face_center_x", 0.5))
+    face_cy = float(kw.get("face_center_y", 0.4))
+    face_w = float(kw.get("face_width", 0.3))
+    face_h = float(kw.get("face_height", 0.45))
+    tilt = float(kw.get("head_tilt_angle", 0.0))
+
+    fc = (face_cx * w, face_cy * h)
+    R = max(face_w * w, face_h * h) * 1.1
+
+    bs = max(5, min(50, batch_size))
+    target_frames = int(1600 - (bs - 5) * (1300 / 45))
+    target_frames = max(250, min(1600, target_frames))
+
+    # ── Layer 1: Structural Draft Guidelines ─────────────────────────────────
+    draft_canvas = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    draft_draw = ImageDraw.Draw(draft_canvas)
+    guide_color = (225, 225, 225, 255)
+    
+    draft_draw.ellipse(
+        [fc[0] - face_w * w / 2, fc[1] - face_h * h / 2, fc[0] + face_w * w / 2, fc[1] + face_h * h / 2],
+        outline=guide_color, width=1
+    )
+    rad = np.radians(tilt)
+    cos_t, sin_t = np.cos(rad), np.sin(rad)
+    draft_draw.line(
+        [fc[0] - sin_t * face_h * h / 2, fc[1] - cos_t * face_h * h / 2,
+         fc[0] + sin_t * face_h * h / 2, fc[1] + cos_t * face_h * h / 2],
+        fill=guide_color, width=1
+    )
+    draft_draw.line(
+        [fc[0] - cos_t * face_w * w / 2, fc[1] + sin_t * face_w * w / 2,
+         fc[0] + cos_t * face_w * w / 2, fc[1] - sin_t * face_w * w / 2],
+        fill=guide_color, width=1
+    )
+
     canvas_np = np.full((h, w, 3), 242, dtype=np.uint8)
-    yield Image.fromarray(canvas_np).convert("RGB")
+    
+    # Yield initial wash + draft
+    frame_img = Image.fromarray(canvas_np).convert("RGBA")
+    frame_img.paste(draft_canvas, (0, 0), mask=draft_canvas.split()[3])
+    yield frame_img.convert("RGB")
 
     gray          = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
     saliency_norm = gpu_saliency(gray)
@@ -111,11 +154,14 @@ def draw(
     max_dim    = max(w, h)
     passes_cfg = [
         # pass_idx, smooth_k, base_step, base_hl, pass_opacity
-        (0, 31, max(16, max_dim // 24), max(22, max_dim // 18), 0.80), # Blocking
-        (1, 15, max(10, max_dim // 40), max(12, max_dim // 30), 0.85), # Medium Form
-        (2, 5,  max(5,  max_dim // 80), max(6,  max_dim // 60), 0.90), # Details
+        (0, 31, max(16, max_dim // 24), max(22, max_dim // 18), 0.80), # Stage 2: Blocking
+        (1, 15, max(10, max_dim // 40), max(12, max_dim // 30), 0.85), # Stage 3: Medium Form
+        (2, 5,  max(5,  max_dim // 80), max(6,  max_dim // 60), 0.90), # Stage 4: Details
     ]
 
+    frames_per_stage = target_frames // 5
+
+    # ── Stage 2, 3, 4: Paint brushwork ────────────────────────────────────────
     for pass_idx, smooth_k, base_step, base_hl, pass_opacity in passes_cfg:
         color_src = cv2.GaussianBlur(img_np, (smooth_k, smooth_k), 0)
         strokes = []
@@ -127,12 +173,18 @@ def draw(
                 ry = max(0, min(h - 1, int(cy_s + random.uniform(-step * 0.3, step * 0.3))))
                 sal = float(saliency_norm[ry, rx])
                 
+                dist = np.sqrt((rx - fc[0])**2 + (ry - fc[1])**2)
+
                 if pass_idx == 2:
                     hl = max(2, int(base_hl * (1.0 - sal * 0.7)))
                 elif pass_idx == 1:
                     hl = max(4, int(base_hl * (1.0 - sal * 0.5)))
                 else:
                     hl = max(8, int(base_hl * (1.0 - sal * 0.3)))
+                
+                # Simplify background brushwork (larger, looser strokes)
+                if dist >= R:
+                    hl = int(hl * 1.5)
                 
                 hw = max(1, int(hl * 0.28))
                 color = tuple(int(c) for c in color_src[ry, rx])
@@ -144,40 +196,49 @@ def draw(
                 
                 strokes.append((rx, ry, color, angle_deg, hl, hw, sal))
 
-        # Paint fine details on subject first
         if pass_idx == 2:
             strokes.sort(key=lambda s: s[6], reverse=True)
         else:
             random.shuffle(strokes)
 
         n_s = len(strokes)
-        eff_s = max(1, min(batch_size, max(1, n_s // 80)))
+        eff_s = max(1, n_s // max(10, frames_per_stage))
 
         for idx, (rx, ry, color, angle_deg, hl, hw, _) in enumerate(strokes):
             color_bgr = (color[2], color[1], color[0])
             _paint_stroke_soft(canvas_np, heightmap_np, rx, ry, color_bgr, angle_deg, hl, hw, pass_opacity)
             
             if idx % eff_s == 0 or idx == n_s - 1:
-                yield Image.fromarray(cv2.cvtColor(canvas_np, cv2.COLOR_BGR2RGB))
+                frame_img = Image.fromarray(cv2.cvtColor(canvas_np, cv2.COLOR_BGR2RGB)).convert("RGBA")
+                # overlay draft guidelines
+                frame_img.paste(draft_canvas, (0, 0), mask=draft_canvas.split()[3])
+                yield frame_img.convert("RGB")
 
-    # ── Pass 4: Apply 3D Impasto paint height lighting ───────────────────────
+    # ── Stage 5: Eraser Phase (Guidelines fade out) & Final Shading ───────────
     final_rgb = cv2.cvtColor(canvas_np, cv2.COLOR_BGR2RGB)
     shaded_np = _apply_impasto_lighting(final_rgb, heightmap_np, intensity=35.0)
 
-    # ── Pass 5: Detail Restoration on highly salient regions ─────────────────
     if saliency_norm is not None:
-        # Create a smooth blending mask for salient regions (face/eyes/hands)
         detail_mask = np.clip((saliency_norm - 0.35) / 0.30, 0.0, 1.0)
         detail_mask = cv2.GaussianBlur(detail_mask, (15, 15), 0)[:, :, np.newaxis]
-        
-        # Smooth bilateral details of original
         orig_smooth = cv2.bilateralFilter(img_np, d=9, sigmaColor=50, sigmaSpace=50)
-        
-        # Blend original details back on salient regions to preserve high-fidelity portrait features
         shaded_np = (shaded_np.astype(np.float32) * (1.0 - detail_mask * 0.70) + 
                      orig_smooth.astype(np.float32) * (detail_mask * 0.70)).astype(np.uint8)
 
-    # Blend soft canvas texture at the end
+    # Eraser loop
+    for step in range(15):
+        opacity_factor = 1.0 - (step / 15.0)
+        frame_img = Image.fromarray(shaded_np).convert("RGBA")
+        
+        draft_np = np.array(draft_canvas)
+        draft_np[:, :, 3] = (draft_np[:, :, 3].astype(np.float32) * opacity_factor).astype(np.uint8)
+        faded_draft = Image.fromarray(draft_np)
+        
+        frame_img.paste(faded_draft, (0, 0), mask=faded_draft.split()[3])
+        yield frame_img.convert("RGB")
+        faded_draft.close()
+
+    # Blend soft canvas texture
     try:
         tex = gpu_canvas_texture(w, h)
         shaded_f = shaded_np.astype(np.float32) / 255.0
@@ -189,3 +250,5 @@ def draw(
     except Exception as te:
         print(f"[oil] Canvas texture failed: {te}")
         yield Image.fromarray(shaded_np)
+
+    draft_canvas.close()

@@ -240,13 +240,8 @@ document.addEventListener("DOMContentLoaded", () => {
                         if (optRes.ok) {
                             aiParams = await optRes.json();
 
-                            // Update sliders with Gemini's recommendations
-                            if (blurSlider)     { blurSlider.value     = aiParams.blur_size;      blurVal.textContent     = aiParams.blur_size; }
-                            if (blockSlider)    { blockSlider.value    = aiParams.threshold_block; blockVal.textContent    = aiParams.threshold_block; }
-                            if (cSlider)        { cSlider.value        = aiParams.threshold_c;    cVal.textContent        = aiParams.threshold_c; }
-                            if (jitterSlider)   { jitterSlider.value   = aiParams.jitter;         jitterVal.textContent   = aiParams.jitter; }
-                            if (hatchingSlider) { hatchingSlider.value = aiParams.hatching;       hatchingVal.textContent = aiParams.hatching; }
-
+                            // Gemini does not overwrite the user's manual adjustments of OpenCV rendering parameters.
+                            // It is used as a context controller (landmarks, angle, subject detection).
                             explanationText = `📊 Gemini 3.1 Flash Lite: ${aiParams.explanation}\n\n`;
                             statusBox.innerText = `${explanationText}Thông số đã được Gemini tối ưu!`;
                         } else {

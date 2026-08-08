@@ -1,11 +1,17 @@
 """
-modes/blueprint.py — Paint-by-Numbers Blueprint
-=================================================
-Approach: TRUE paint-by-numbers painting flow
-  1. Start with a warm paper canvas.
-  2. Draw all region outlines (black/dark-gray contours) and centroid color labels (numbers).
-     This yields the complete blank coloring template first.
-  3. Progressively fill color region-by-region (largest to smallest) to simulate the painting process.
+modes/blueprint.py — Paint-by-Numbers Blueprint (5-Layer Progressive Drawing)
+=============================================================================
+Approach: TRUE paint-by-numbers painting flow in 5 sequential stages
+  - Layer 1: Structural Draft (Phác thảo cấu trúc):
+    * Faint light-blue guidelines (oval, axes, eyes) based on Gemini landmarks.
+  - Layer 2: Region Outlines (Đường biên phân vùng):
+    * Dark gray contour boundaries of all segments.
+  - Layer 3: Numeric Labels (Đánh số màu):
+    * Region color numbers drawn at the centroid of each segment.
+  - Layer 4: Progressive Color Fill (Tô màu phân vùng):
+    * Region color fills drawn progressively (largest to smallest).
+  - Layer 5: Eraser Phase (Xoá nét nháp):
+    * Fading out the light-blue blueprint draft guidelines.
 """
 
 import cv2
@@ -60,7 +66,7 @@ def draw(
     *,
     jitter: float = 0.05,
     batch_size: int = 10,
-    **_kw,
+    **kw,
 ):
     w, h = pil_img.size
     img_np = np.array(pil_img.convert("RGB"))
@@ -69,20 +75,62 @@ def draw(
     k = 12
     seg, centers = _kmeans_seg(img_np, k=k)
 
-    # ── Canvas starts as warm paper template ─────────────────────────────────
-    canvas = Image.new("RGB", (w, h), (252, 250, 244))
-    draw_layer = ImageDraw.Draw(canvas)
-    yield canvas.copy()
+    face_cx = float(kw.get("face_center_x", 0.5))
+    face_cy = float(kw.get("face_center_y", 0.4))
+    face_w = float(kw.get("face_width", 0.3))
+    face_h = float(kw.get("face_height", 0.45))
+    tilt = float(kw.get("head_tilt_angle", 0.0))
 
-    # ── Step 1: Draw All Boundaries (Template lines) ──────────────────────────
+    fc = (face_cx * w, face_cy * h)
+    R = max(face_w * w, face_h * h) * 1.1
+
+    bs = max(5, min(50, batch_size))
+    target_frames = int(1600 - (bs - 5) * (1300 / 45))
+    target_frames = max(250, min(1600, target_frames))
+
+    # ── Layer 1: Blue Draft guidelines (simulating blueprints) ────────────────
+    draft_canvas = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    draft_draw = ImageDraw.Draw(draft_canvas)
+    guide_color = (200, 220, 255, 255) # faint blue
+    
+    draft_draw.ellipse(
+        [fc[0] - face_w * w / 2, fc[1] - face_h * h / 2, fc[0] + face_w * w / 2, fc[1] + face_h * h / 2],
+        outline=guide_color, width=1
+    )
+    rad = np.radians(tilt)
+    cos_t, sin_t = np.cos(rad), np.sin(rad)
+    draft_draw.line(
+        [fc[0] - sin_t * face_h * h / 2, fc[1] - cos_t * face_h * h / 2,
+         fc[0] + sin_t * face_h * h / 2, fc[1] + cos_t * face_h * h / 2],
+        fill=guide_color, width=1
+    )
+    draft_draw.line(
+        [fc[0] - cos_t * face_w * w / 2, fc[1] + sin_t * face_w * w / 2,
+         fc[0] + cos_t * face_w * w / 2, fc[1] - sin_t * face_w * w / 2],
+        fill=guide_color, width=1
+    )
+
+    # ── Drawing Canvas ────────────────────────────────────────────────────────
+    drawing_canvas = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    draw_layer = ImageDraw.Draw(drawing_canvas)
+
+    paper_base = Image.new("RGB", (w, h), (252, 250, 244))
+    
+    # Yield initial paper with draft guidelines
+    frame_img = paper_base.copy()
+    frame_img.paste(draft_canvas, (0, 0), mask=draft_canvas.split()[3])
+    yield frame_img.copy()
+
+    # Extract boundaries
     boundary_mask = _region_boundaries(seg)
     thinned_b = _thin_edges(boundary_mask)
     cnts_b, _ = cv2.findContours(thinned_b, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
     cnts_b = sorted(cnts_b, key=lambda c: cv2.arcLength(c, False), reverse=True)
-    
-    n_b = len(cnts_b)
-    eff_b = max(1, min(batch_size, max(1, n_b // 60)))
 
+    frames_per_stage = target_frames // 5
+
+    # ── Stage 2: Draw Outlines ───────────────────────────────────────────────
+    eff_b = max(1, len(cnts_b) // max(10, frames_per_stage))
     for idx, cnt in enumerate(cnts_b):
         p = cv2.arcLength(cnt, False)
         if p < 12:
@@ -96,74 +144,89 @@ def draw(
                 dx = 0.8 * dx + 0.2 * random.gauss(0, jitter)
                 dy = 0.8 * dy + 0.2 * random.gauss(0, jitter)
                 result.append((x + dx, y + dy))
-            draw_layer.line(result, fill=(90, 90, 90), width=1)
+            draw_layer.line(result, fill=(130, 130, 130, 255), width=1)
             
-        if idx % eff_b == 0 or idx == n_b - 1:
-            yield canvas.copy()
+        if idx % eff_b == 0 or idx == len(cnts_b) - 1:
+            frame_img = paper_base.copy()
+            frame_img.paste(draft_canvas, (0, 0), mask=draft_canvas.split()[3])
+            frame_img.paste(drawing_canvas, (0, 0), mask=drawing_canvas.split()[3])
+            yield frame_img.copy()
 
-    # ── Step 2: Draw Labels (Numbers) ─────────────────────────────────────────
-    # Keep number labels on top of regions
-    labels_to_place = []
-    for ki in range(k):
-        mask = (seg == ki).astype(np.uint8) * 255
-        kernel_lbl = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_lbl)
-        cnts_lbl, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        for cnt in cnts_lbl:
-            area = cv2.contourArea(cnt)
-            if area < 1000:
+    # ── Stage 3: Draw Numbers ────────────────────────────────────────────────
+    # Get centroids and colors for all unique segments
+    regions = []
+    for label_id in range(k):
+        mask = (seg == label_id).astype(np.uint8)
+        c_cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for cc in c_cnts:
+            area = cv2.contourArea(cc)
+            if area < 100:
                 continue
-            M = cv2.moments(cnt)
-            if M["m00"] != 0:
+            M = cv2.moments(cc)
+            if M["m00"] > 0:
                 cx = int(M["m10"] / M["m00"])
                 cy = int(M["m01"] / M["m00"])
-                labels_to_place.append((cx, cy, str(ki + 1)))
+                regions.append((area, cx, cy, label_id, cc))
 
-    for cx, cy, txt in labels_to_place:
-        # Draw small dark gray label text
-        draw_layer.text((cx - 4, cy - 6), txt, fill=(80, 80, 80))
-    yield canvas.copy()
+    regions.sort(key=lambda r: r[0], reverse=True)
+    eff_n = max(1, len(regions) // max(5, frames_per_stage))
 
-    # Save the template states
-    template_canvas = canvas.copy()
+    for idx, (area, cx, cy, label_id, cc) in enumerate(regions):
+        num_str = str(label_id + 1)
+        draw_layer.text((cx - 3, cy - 5), num_str, fill=(140, 140, 140, 255))
+        
+        if idx % eff_n == 0 or idx == len(regions) - 1:
+            frame_img = paper_base.copy()
+            frame_img.paste(draft_canvas, (0, 0), mask=draft_canvas.split()[3])
+            frame_img.paste(drawing_canvas, (0, 0), mask=drawing_canvas.split()[3])
+            yield frame_img.copy()
 
-    # ── Step 3: Color painting process (Fill regions largest to smallest) ────
-    region_areas = []
-    for ki in range(k):
-        mask = ((seg == ki).astype(np.uint8) * 255)
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-        cnts_reg, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        for cnt in cnts_reg:
-            area = cv2.contourArea(cnt)
-            if area >= 200:
-                region_areas.append((ki, cnt, area))
+    # ── Stage 4: Progressive color filling ────────────────────────────────────
+    filled_canvas = drawing_canvas.copy()
+    fill_draw = ImageDraw.Draw(filled_canvas)
 
-    region_areas.sort(key=lambda x: -x[2])  # Paint large shapes first
+    for idx, (area, cx, cy, label_id, cc) in enumerate(regions):
+        pts = [tuple(pt[0]) for pt in cc]
+        color = tuple(centers[label_id])
+        if len(pts) > 2:
+            fill_draw.polygon(pts, fill=(*color, 255))
 
-    # Paint regions progressively
-    n_r = len(region_areas)
-    eff_r = max(1, min(batch_size, max(1, n_r // 80)))
-
-    for idx, (ki, cnt, area) in enumerate(region_areas):
-        p = cv2.arcLength(cnt, True)
-        approx = cv2.approxPolyDP(cnt, max(0.2, 0.004 * p), True)
-        pts = [tuple(pt[0]) for pt in approx]
-        if len(pts) >= 3:
-            color = tuple(int(c) for c in centers[ki])
-            # Draw color region
-            draw_layer.polygon(pts, fill=color)
+        if idx % eff_n == 0 or idx == len(regions) - 1:
+            frame_img = paper_base.copy()
+            frame_img.paste(draft_canvas, (0, 0), mask=draft_canvas.split()[3])
+            frame_img.paste(filled_canvas, (0, 0), mask=filled_canvas.split()[3])
+            # multiply outlines/numbers on top
+            lines_only = paper_base.copy()
+            lines_only.paste(drawing_canvas, (0, 0), mask=drawing_canvas.split()[3])
             
-        if idx % eff_r == 0 or idx == n_r - 1:
-            # Composite template outlines and labels back on top so they remain visible
-            colored_np = np.array(canvas)
-            template_np = np.array(template_canvas)
-            # Lines are drawn on top using a simple minimum blend
-            blended = np.minimum(colored_np, template_np)
+            blended = np.clip((np.array(frame_img).astype(np.float32) / 255.0) * (np.array(lines_only).astype(np.float32) / 255.0) * 255.0, 0, 255).astype(np.uint8)
             yield Image.fromarray(blended)
 
-    # Yield final completely colored image with lines
-    yield Image.fromarray(np.minimum(np.array(canvas), np.array(template_canvas)))
-    canvas.close()
-    template_canvas.close()
+    # ── Stage 5: Eraser Phase (fading blueprint draft guides) ────────────────
+    lines_only = paper_base.copy()
+    lines_only.paste(drawing_canvas, (0, 0), mask=drawing_canvas.split()[3])
+
+    base_frame = paper_base.copy()
+    base_frame.paste(filled_canvas, (0, 0), mask=filled_canvas.split()[3])
+    base_blended = np.clip((np.array(base_frame).astype(np.float32) / 255.0) * (np.array(lines_only).astype(np.float32) / 255.0) * 255.0, 0, 255).astype(np.uint8)
+
+    for step in range(15):
+        opacity_factor = 1.0 - (step / 15.0)
+        
+        frame_img = Image.fromarray(base_blended).convert("RGBA")
+        
+        draft_np = np.array(draft_canvas)
+        draft_np[:, :, 3] = (draft_np[:, :, 3].astype(np.float32) * opacity_factor).astype(np.uint8)
+        faded_draft = Image.fromarray(draft_np)
+        
+        frame_img.paste(faded_draft, (0, 0), mask=faded_draft.split()[3])
+        yield frame_img.convert("RGB")
+        faded_draft.close()
+
+    # Final frame (clean, guidelines completely erased)
+    yield Image.fromarray(base_blended)
+
+    paper_base.close()
+    draft_canvas.close()
+    drawing_canvas.close()
+    filled_canvas.close()
