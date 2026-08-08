@@ -2,6 +2,16 @@
 modes/sketch.py — Realistic Charcoal/Pencil Sketch (5-Layer Progressive Drawing)
 ================================================================================
 Approach: MASTER progressive sketching technique in 5 sequential stages
+  - Preprocessing: Focal-Saliency Edge Guidance:
+    * Apply aggressive bilateral filter/blur outside the face area to completely
+      eliminate noisy background textures (like flowers, garments) before edge detection.
+    * Keep the face crisp to extract fine features.
+  - Path Extraction: 1D Gaussian Path Smoothing:
+    * Avoid approxPolyDP (polygonal distortion). Keep raw coordinates and smooth
+      them with a 1D Gaussian kernel to ensure silky, organic, hand-drawn curves.
+  - Line Weight & Tone Tapering:
+    * Vary both stroke width AND pencil opacity along the path using a sine pressure curve.
+    * Lines fade out elegantly at both ends (pressure release).
   - Layer 1: Structural Draft & Soft Smudging (Phác thảo & Di chì):
     * Faint geometric guidelines (oval, axes, eyes) based on Gemini landmarks.
     * Soft charcoal smudging layer (faint shadow wash) to establish 3D volume.
@@ -9,7 +19,6 @@ Approach: MASTER progressive sketching technique in 5 sequential stages
     * Outer boundaries of the subject and background contours.
   - Layer 3: Face & Portrait Details (Chi tiết ngũ quan):
     * High-precision, sharp, dark outlines for eyes, eyelashes, nose, mouth.
-    * Uses a lower min_path_len on the face to preserve fine features.
   - Layer 4: Core Shading & Dark Hatching (Đánh bóng tối):
     * Tangent-aligned long sweeping strokes in deep shadows.
   - Layer 5: Midtone Shading & Eraser Clean-up (Đánh bóng sáng & Xoá nét nháp):
@@ -29,18 +38,29 @@ from src.gpu_utils import (
 )
 
 
-def _smooth_path(path, window_size=3):
-    if len(path) < window_size:
+def _gaussian_smooth_path(path, sigma=1.5):
+    """Applies a 1D Gaussian kernel to smooth coordinate trajectories (eliminating polygonal jaggedness)."""
+    N = len(path)
+    if N < 3:
         return path
-    smoothed = []
-    for i in range(len(path)):
-        start = max(0, i - window_size // 2)
-        end = min(len(path), i + window_size // 2 + 1)
-        window = path[start:end]
-        xs = [pt[0] for pt in window]
-        ys = [pt[1] for pt in window]
-        smoothed.append((sum(xs)/len(window), sum(ys)/len(window)))
-    return smoothed
+        
+    # Create 1D Gaussian kernel
+    radius = int(round(3.0 * sigma))
+    x = np.arange(-radius, radius + 1)
+    kernel = np.exp(-0.5 * (x / sigma) ** 2)
+    kernel /= kernel.sum()
+    
+    xs = np.array([pt[0] for pt in path])
+    ys = np.array([pt[1] for pt in path])
+    
+    # Pad borders to handle edge cases
+    xs_padded = np.pad(xs, radius, mode='edge')
+    ys_padded = np.pad(ys, radius, mode='edge')
+    
+    xs_smooth = np.convolve(xs_padded, kernel, mode='valid')
+    ys_smooth = np.convolve(ys_padded, kernel, mode='valid')
+    
+    return [ (float(xs_smooth[i]), float(ys_smooth[i])) for i in range(N) ]
 
 
 def _thin_edges(binary_img):
@@ -71,8 +91,27 @@ def _dog_edges(gray, sigma=1.2, k=1.6, tau=0.98, thresh=8):
 def _build_contour_paths(gray, saliency_norm, clo, chi, fc, R):
     h, w = gray.shape
 
-    # 1. Hessian Ridge
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0.8)
+    # 1. Focal-Saliency Preprocessing:
+    # Build a hybrid source image for edge detection where background/flowers are heavily smoothed
+    # to prevent noisy textured outlines, while keeping the face crisp.
+    x_indices = np.arange(w)
+    y_indices = np.arange(h)
+    xs, ys = np.meshgrid(x_indices, y_indices)
+    dists = np.sqrt((xs - fc[0])**2 + (ys - fc[1])**2)
+    
+    # Focal mask (1.0 on face, fades to 0.0 outside)
+    focal_mask = np.clip(1.0 - (dists - R) / R, 0.0, 1.0)
+    focal_mask = cv2.GaussianBlur(focal_mask, (21, 21), 0)
+    
+    # Create heavily smoothed background image
+    bg_smooth = cv2.bilateralFilter(gray, d=17, sigmaColor=120, sigmaSpace=120)
+    bg_smooth = cv2.GaussianBlur(bg_smooth, (9, 9), 0)
+    
+    # Combine sharp face and smooth background
+    hybrid_gray = (gray.astype(np.float32) * focal_mask + bg_smooth.astype(np.float32) * (1.0 - focal_mask)).astype(np.uint8)
+
+    # Now extract edges from the hybrid image
+    blurred = cv2.GaussianBlur(hybrid_gray, (5, 5), 0.8)
     Ixx = cv2.Sobel(blurred, cv2.CV_32F, 2, 0, ksize=3)
     Iyy = cv2.Sobel(blurred, cv2.CV_32F, 0, 2, ksize=3)
     Ixy = cv2.Sobel(blurred, cv2.CV_32F, 1, 1, ksize=3)
@@ -81,8 +120,7 @@ def _build_contour_paths(gray, saliency_norm, clo, chi, fc, R):
     ridges = np.zeros_like(gray, dtype=np.uint8)
     ridges[val > 5.5] = 255
 
-    # 2. DoG Edges
-    edges = _dog_edges(gray, sigma=1.2, k=1.6, tau=0.97, thresh=6)
+    edges = _dog_edges(hybrid_gray, sigma=1.2, k=1.6, tau=0.97, thresh=6)
     
     merge_k = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9))
     merged = cv2.dilate(edges, merge_k, iterations=1)
@@ -95,15 +133,14 @@ def _build_contour_paths(gray, saliency_norm, clo, chi, fc, R):
     for cnt in cnts:
         p = cv2.arcLength(cnt, False)
         
-        # Keep shorter paths near the face to preserve fine features (eyes, nose, mouth)
-        # Check coordinates of centroid
-        approx = cv2.approxPolyDP(cnt, 0.4, False)
+        # Approximate only slightly to filter tiny noise, but keep raw coordinates
+        approx = cv2.approxPolyDP(cnt, 0.25, False)
         if len(approx) > 1:
             path = [tuple(pt[0]) for pt in approx]
             mx, my = path[len(path)//2]
             dist = np.sqrt((mx - fc[0])**2 + (my - fc[1])**2)
             
-            min_len = 6 if dist < R else 15
+            min_len = 6 if dist < R else 18 # raise background line length threshold to drop noisy bits
             if p < min_len:
                 continue
                 
@@ -111,24 +148,33 @@ def _build_contour_paths(gray, saliency_norm, clo, chi, fc, R):
             if gray[ry, rx] < 40 and saliency_norm[ry, rx] < 0.25:
                 continue
                 
-            smoothed = _smooth_path(path, window_size=3)
+            # Apply 1D Gaussian coordinate smoothing to make lines flow beautifully
+            smoothed = _gaussian_smooth_path(path, sigma=2.0)
             paths.append(smoothed)
     return paths
 
 
-def _draw_tapered_line(draw_layer, pts, color, base_width):
+def _draw_tapered_line(draw_layer, pts, base_tone, base_width):
+    """Draws a smooth line with variable stroke width AND tone opacity (pressure tapering)."""
     N = len(pts)
     if N < 2:
         return
     for i in range(N - 1):
         t = (i + 0.5) / N
-        w = max(1.0, base_width * np.sin(np.pi * t))
-        draw_layer.line([pts[i], pts[i+1]], fill=color, width=int(round(w)))
+        pressure = np.sin(np.pi * t)
+        
+        # Width variation
+        w = max(1.0, base_width * pressure)
+        
+        # Tone variation (fades out at both ends)
+        tone_val = int(round(255 - (255 - base_tone) * pressure))
+        
+        draw_layer.line([pts[i], pts[i+1]], fill=(tone_val, tone_val, tone_val, 255), width=int(round(w)))
 
 
 def _generate_cross_contour_hatching(gray, saliency_norm, w, h, hatching_intensity, fc, R):
     strokes = []
-    spacing = max(10, min(w, h) // 80) # denser grid for richer textures
+    spacing = max(12, min(w, h) // 80)
     
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
     sobelx = cv2.Sobel(blurred, cv2.CV_32F, 1, 0, ksize=3)
@@ -139,7 +185,7 @@ def _generate_cross_contour_hatching(gray, saliency_norm, w, h, hatching_intensi
             sal = float(saliency_norm[y, x]) if saliency_norm is not None else 1.0
             
             dist = np.sqrt((x - fc[0])**2 + (y - fc[1])**2)
-            sal_thresh = 0.22 if dist < R else 0.40
+            sal_thresh = 0.22 if dist < R else 0.45 # drop background shading aggressively
             if sal < sal_thresh:
                 continue
                 
@@ -147,13 +193,11 @@ def _generate_cross_contour_hatching(gray, saliency_norm, w, h, hatching_intensi
             if lum >= 215:
                 continue
                 
-            # Allow light skin shading on the face
             is_face = dist < R
             if is_face and lum > 140:
-                # Soft skin shading
-                if random.random() > 0.35:
+                if random.random() > 0.25:
                     continue
-                tone = random.randint(200, 225) # very light pencil
+                tone = random.randint(210, 230)
                 lw = 1
             else:
                 if lum >= 85 and hatching_intensity <= 0.05:
@@ -188,22 +232,19 @@ def _generate_cross_contour_hatching(gray, saliency_norm, w, h, hatching_intensi
                 L = random.uniform(22, 32)
                 
             if dist >= R:
-                L *= 0.7
-                tone = min(220, tone + 80)
+                L *= 0.6
+                tone = min(225, tone + 95)
                 lw = 1
                 
-            strokes.append(((x1, y1) if 'x1' in locals() else (x - np.cos(angle)*L/2, y - np.sin(angle)*L/2), 
-                            (x2, y2) if 'x2' in locals() else (x + np.cos(angle)*L/2, y + np.sin(angle)*L/2), 
-                            tone, lw, y, lum))
+            cos_a = np.cos(angle)
+            sin_a = np.sin(angle)
+            pt1 = (x - cos_a * L / 2, y - sin_a * L / 2)
+            pt2 = (x + cos_a * L / 2, y + sin_a * L / 2)
+            
+            strokes.append((pt1, pt2, tone, lw, y, lum))
                 
-    # Fix local variables referencing issue
-    actual_strokes = []
-    for pt1, pt2, tone, lw, y, lum in strokes:
-        # Recompute coordinates cleanly
-        actual_strokes.append((pt1, pt2, tone, lw, y, lum))
-        
-    actual_strokes.sort(key=lambda s: s[4] + random.uniform(-30, 30))
-    return actual_strokes
+    strokes.sort(key=lambda s: s[4] + random.uniform(-30, 30))
+    return strokes
 
 
 def _path_saliency(path, saliency_norm, w, h):
@@ -277,10 +318,8 @@ def draw(
     shadow_strength = float(kw.get("shadow_strength", 0.35))
     inverted_gray = 255 - gray
     smudge_np = cv2.GaussianBlur(inverted_gray, (45, 45), 0)
-    # Scale smudge intensity
     smudge_np = np.clip(smudge_np.astype(np.float32) * (shadow_strength * 0.40), 0, 255).astype(np.uint8)
     
-    # Paper base has soft smudging applied
     paper_base_np = np.clip(255 - smudge_np, 0, 255).astype(np.uint8)
     paper_base = Image.fromarray(cv2.cvtColor(paper_base_np, cv2.COLOR_GRAY2RGB)).convert("RGBA")
 
@@ -293,10 +332,8 @@ def draw(
     frame_img.paste(draft_canvas, (0, 0), mask=draft_canvas.split()[3])
     yield frame_img.convert("RGB")
 
-    # Get outlines
-    clo = max(15, 60 - threshold_c * 5)
-    chi = max(45, 140 - threshold_c * 8)
-    all_outlines = _build_contour_paths(gray, saliency_norm, clo, chi, fc, R)
+    # Get outlines (from preprocessed hybrid image inside build_contour_paths)
+    all_outlines = _build_contour_paths(gray, saliency_norm, None, None, fc, R)
     
     main_outlines = []
     portrait_details = []
@@ -332,7 +369,7 @@ def draw(
         if dist >= R:
             tone = min(220, tone + 60)
 
-        _draw_tapered_line(draw_layer, path, (tone, tone, tone, 255), line_w)
+        _draw_tapered_line(draw_layer, path, tone, line_w)
 
         if idx % eff_out == 0 or idx == len(main_outlines) - 1:
             frame_img = paper_base.copy()
@@ -363,7 +400,7 @@ def draw(
             tone = random.randint(40, 85)
             line_w = 1
 
-        _draw_tapered_line(draw_layer, path, (tone, tone, tone, 255), line_w)
+        _draw_tapered_line(draw_layer, path, tone, line_w)
 
         if idx % eff_det == 0 or idx == len(portrait_details) - 1:
             frame_img = paper_base.copy()
@@ -377,10 +414,8 @@ def draw(
     # ── Stage 4: Draw Core Shading & Dark Hatching ───────────────────────────
     eff_dark = max(1, len(dark_hatching) // max(10, frames_per_stage))
     for idx, (pt1, pt2, tone, lw, _, _) in enumerate(dark_hatching):
-        x1, y1 = pt1
-        x2, y2 = pt2
-        mx = (x1 + x2) / 2 + random.uniform(-0.4, 0.4)
-        my = (y1 + y2) / 2 + random.uniform(-0.4, 0.4)
+        mx = (pt1[0] + pt2[0]) / 2 + random.uniform(-0.4, 0.4)
+        my = (pt1[1] + pt2[1]) / 2 + random.uniform(-0.4, 0.4)
         
         draw_layer.line([pt1, (mx, my), pt2], fill=(tone, tone, tone, 255), width=lw)
         
@@ -398,15 +433,12 @@ def draw(
     total_mid = len(midtone_hatching)
     
     for idx, (pt1, pt2, tone, lw, _, _) in enumerate(midtone_hatching):
-        x1, y1 = pt1
-        x2, y2 = pt2
-        mx = (x1 + x2) / 2 + random.uniform(-0.4, 0.4)
-        my = (y1 + y2) / 2 + random.uniform(-0.4, 0.4)
+        mx = (pt1[0] + pt2[0]) / 2 + random.uniform(-0.4, 0.4)
+        my = (pt1[1] + pt2[1]) / 2 + random.uniform(-0.4, 0.4)
         
         draw_layer.line([pt1, (mx, my), pt2], fill=(tone, tone, tone, 255), width=lw)
         
         if idx % eff_mid == 0 or idx == total_mid - 1:
-            # Linearly fade draft opacity
             opacity_factor = 1.0 - (idx / float(max(1, total_mid - 1)))
             
             frame_img = paper_base.copy()
