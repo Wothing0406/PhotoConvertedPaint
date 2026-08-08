@@ -212,6 +212,7 @@ document.addEventListener("DOMContentLoaded", () => {
             currentResultPath = null;
 
             drawingFrames = [];
+            if (canvasImg) canvasImg.src = "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='100' height='100'><rect width='100' fill='%2318181b' height='100'/></svg>";
             if (statusBox) statusBox.classList.remove("success");
             if (replayInterval) { clearInterval(replayInterval); replayInterval = null; }
 

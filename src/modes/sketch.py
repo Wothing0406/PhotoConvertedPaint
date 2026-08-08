@@ -1,23 +1,23 @@
 """
-modes/sketch.py — Realistic Sketch / Charcoal Drawing
-=======================================================
-GPU Acceleration via src.gpu_utils (CuPy → CPU fallback):
-  - Pencil dodge blend      → gpu_pencil_dodge     (GPU)
-  - Dark shadow composite   → gpu_dark_mask_composite (GPU)
-  - Gaussian blur           → gpu_gaussian_blur    (GPU)
-  - Canny edge paths        → gpu_canny            (blur on GPU, Canny on CPU)
+modes/sketch.py — Realistic Charcoal/Pencil Sketch
+=====================================================
+Approach: TRUE progressive artist sketch technique
+  1. Start with a pure white paper canvas.
+  2. Draw the outline contours first (silhouette & structure) from center-out/outside-in.
+  3. Draw detail lines (features, cloth folds) with fine graphite strokes.
+  4. Fade in the value shading layer (shading, core shadows) progressively *after* outlines
+     are drawn, simulating hand-smudged charcoal or soft graphite shading.
+  5. Saliency gating ensures background walls stay clean white.
 """
 
 import cv2
 import numpy as np
 import random
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageDraw
 
 from src.gpu_utils import (
     gpu_gaussian_blur,
-    gpu_pencil_dodge,
-    gpu_dark_mask_composite,
-    gpu_canny,
+    gpu_saliency,
     GPU_AVAILABLE,
 )
 
@@ -25,24 +25,82 @@ from src.gpu_utils import (
 def _jitter(pts, amount: float):
     result, dx, dy = [], 0.0, 0.0
     for x, y in pts:
-        dx = 0.82 * dx + 0.18 * random.gauss(0, amount * 1.5)
-        dy = 0.82 * dy + 0.18 * random.gauss(0, amount * 1.5)
+        dx = 0.82 * dx + 0.18 * random.gauss(0, amount * 1.8)
+        dy = 0.82 * dy + 0.18 * random.gauss(0, amount * 1.8)
         result.append((x + dx, y + dy))
     return result
 
 
-def _canny_paths(gray, lo, hi, blur, eps_factor=0.0005):
-    edges = gpu_canny(gray, lo, hi, blur)
-    cnts, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+def _thin_edges(binary_img):
+    element = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
+    skel = np.zeros(binary_img.shape, np.uint8)
+    img = binary_img.copy()
+    for _ in range(12):
+        eroded = cv2.erode(img, element)
+        temp = cv2.dilate(eroded, element)
+        temp = cv2.subtract(img, temp)
+        skel = cv2.bitwise_or(skel, temp)
+        img = eroded.copy()
+        if cv2.countNonZero(img) == 0:
+            break
+    return skel
+
+
+def _build_contour_paths(gray_bilateral, clo, chi, min_path_len=8):
+    edges = cv2.Canny(gray_bilateral, clo, chi)
+    close_k = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, close_k)
+    merge_k = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    merged = cv2.dilate(edges, merge_k, iterations=1)
+    thinned = _thin_edges(merged)
+    cnts, _ = cv2.findContours(thinned, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
     paths = []
     for cnt in cnts:
         p = cv2.arcLength(cnt, False)
-        if p < 3:
+        if p < min_path_len:
             continue
-        approx = cv2.approxPolyDP(cnt, max(0.05, eps_factor * p), False)
+        eps = max(0.3, 0.00015 * p)  # Higher detail resolution
+        approx = cv2.approxPolyDP(cnt, eps, False)
         if len(approx) > 1:
-            paths.append([tuple(pt[0]) for pt in approx])
+            path = [tuple(pt[0]) for pt in approx]
+            if len(path) > 1:
+                paths.append(path)
     return paths
+
+
+def _build_value_shading(gray_raw, saliency_norm):
+    h, w = gray_raw.shape
+    shading = np.full((h, w), 255.0, dtype=np.float32)
+
+    smooth = cv2.GaussianBlur(gray_raw.astype(np.float32), (25, 25), 0)
+    lum = smooth
+
+    if saliency_norm is not None:
+        sal = np.clip((saliency_norm - 0.08) / 0.35, 0, 1)
+    else:
+        sal = np.ones((h, w), dtype=np.float32)
+
+    # Midtone
+    mid_strength = np.clip((220.0 - lum) / (220.0 - 80.0), 0, 1) * sal
+    shading = shading - mid_strength * (255.0 - 155.0)
+
+    # Shadow
+    shadow_strength = np.clip((160.0 - lum) / 160.0, 0, 1) * sal
+    shading = shading - shadow_strength * (shading - 15.0)
+
+    return np.clip(shading, 0, 255).astype(np.uint8)
+
+
+def _path_saliency(path, saliency_norm, w, h):
+    if saliency_norm is None:
+        return 1.0
+    vals = []
+    step = max(1, len(path) // 8)
+    for pt in path[::step]:
+        x = max(0, min(w - 1, int(pt[0])))
+        y = max(0, min(h - 1, int(pt[1])))
+        vals.append(float(saliency_norm[y, x]))
+    return float(np.mean(vals)) if vals else 0.0
 
 
 def draw(
@@ -50,108 +108,87 @@ def draw(
     *,
     blur_size: int = 3,
     threshold_c: int = 5,
-    jitter: float = 0.40,
-    bg_color_wash: bool = True,
-    wash_opacity: int = 50,
+    jitter: float = 0.45,
     batch_size: int = 10,
     **_kw,
 ):
     w, h = pil_img.size
     img_np = np.array(pil_img.convert("RGB"))
     gray_raw = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
-    # Bilateral filter to smooth out blocky JPEG compression artifacts in shadows/flat areas
+
     gray = cv2.bilateralFilter(gray_raw, 7, 30, 30)
+    saliency_norm = gpu_saliency(gray_raw)
 
-    # ── Layer 1: Warm paper background ───────────────────────────────────────
-    paper = np.full((h, w, 3), (245, 240, 228), dtype=np.uint8)
-
-    if bg_color_wash and wash_opacity > 0:
-        blur_r = max(20, min(w, h) // 7)
-        washed = np.array(
-            pil_img.convert("RGB").filter(ImageFilter.GaussianBlur(radius=blur_r))
-        )
-        g3 = cv2.cvtColor(cv2.cvtColor(washed, cv2.COLOR_RGB2GRAY), cv2.COLOR_GRAY2RGB)
-        washed = cv2.addWeighted(washed, 0.20, g3, 0.80, 0)
-        alpha = min(0.50, wash_opacity / 180.0)
-        paper = cv2.addWeighted(paper, 1.0 - alpha, washed, alpha, 0)
-
-    canvas_np = paper.copy()
+    # ── Canvas starts as pure white paper ─────────────────────────────────────
+    canvas_np = np.full((h, w, 3), 255, dtype=np.uint8)
     pil_canvas = Image.fromarray(canvas_np)
     yield pil_canvas.copy()
-    pil_canvas.close()
 
-    # ── Layer 2: Pencil dodge-blend texture (GPU) ─────────────────────────────
-    pencil_tex = gpu_pencil_dodge(gray, blur_size)          # GPU accelerated
-
-    canvas_f = canvas_np.astype(np.float32) / 255.0
-    pencil_f = pencil_tex.astype(np.float32)[:, :, np.newaxis] / 255.0   # (H,W,1)
-    blended  = np.clip(canvas_f * pencil_f, 0.0, 1.0)
-    canvas_np = (blended * 255).astype(np.uint8)
-
-    pil_canvas = Image.fromarray(canvas_np)
-    yield pil_canvas.copy()
-    pil_canvas.close()
-
-    # ── Layer 3: Tonal shadow darkening (GPU) ────────────────────────────────
-    dark_raw = (gray < 85).astype(np.uint8) * 255
-    dark_mask = gpu_gaussian_blur(dark_raw, 19).astype(np.float32) / 255.0   # GPU
-
-    shadow_strength = _kw.get("shadow_strength", 0.35)
-    canvas_np = gpu_dark_mask_composite(canvas_np.astype(np.float32), dark_mask, strength=shadow_strength)
-
-    pil_canvas = Image.fromarray(canvas_np)
-    yield pil_canvas.copy()
-    pil_canvas.close()
-
-    # ── Layer 4: Canny structural edge strokes ────────────────────────────────
-    clo = max(15, 65 - threshold_c * 6)
-    chi = max(60, 150 - threshold_c * 9)
-    paths = _canny_paths(gray, clo, chi, blur_size, eps_factor=0.0005)
-
-    # Sun / Glow Highlights extraction: detect the bright sun orb contours
-    try:
-        # Threshold at high luminance (225+) where the sun and sky sunset core reside
-        _, thresh_sun = cv2.threshold(gray_raw, 225, 255, cv2.THRESH_BINARY)
-        # Apply a light morph open to isolate clean circles
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        thresh_sun = cv2.morphologyEx(thresh_sun, cv2.MORPH_OPEN, kernel)
-        
-        cnts_sun, _ = cv2.findContours(thresh_sun, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-        for cnt in cnts_sun:
-            p_len = cv2.arcLength(cnt, True)
-            # Accept highlight regions that look like sun or small clouds (avoid massive frame borders)
-            if 30 < p_len < (w + h) * 0.5:
-                approx = cv2.approxPolyDP(cnt, max(1.0, 0.003 * p_len), True)
-                if len(approx) > 4: # Must be a detailed contour (sun/orb)
-                    paths.append([tuple(pt[0]) for pt in approx])
-    except Exception as se:
-        print(f"[sketch] Error extracting sun contour: {se}")
+    # ── Step 1: Extract and draw outlines first (No pre-pasted shading) ──────
+    clo = max(15, 60 - threshold_c * 5)
+    chi = max(45, 140 - threshold_c * 8)
+    outlines = _build_contour_paths(gray, clo, chi, min_path_len=8)
 
     cx0, cy0 = w / 2.0, h / 2.0
-    paths.sort(key=lambda p: -((p[0][0] - cx0)**2 + (p[0][1] - cy0)**2)**0.5)
+    # Prioritize center subject contours drawing first
+    outlines.sort(key=lambda p: _path_saliency(p, saliency_norm, w, h), reverse=True)
 
-    pil_canvas = Image.fromarray(canvas_np)
     draw_layer = ImageDraw.Draw(pil_canvas)
 
-    n = len(paths)
-    eff_batch = max(1, min(batch_size, n // 300)) if n > 0 else batch_size
+    n_out = len(outlines)
+    # Scale yield speed to increase frame counts smoothly
+    eff_out = max(1, min(batch_size, max(1, n_out // 120)))
 
-    for idx, path in enumerate(paths):
+    for idx, path in enumerate(outlines):
         sx = max(0, min(w - 1, int(path[0][0])))
         sy = max(0, min(h - 1, int(path[0][1])))
-        
-        # Calculate localized luminance for adaptive stroke tones
         lum = int(gray[sy, sx])
-        # Deep shadows get dark charcoal (6-25), bright regions get delicate light-grey (80-140)
-        tone_factor = 0.32 + 0.35 * (lum / 255.0)
-        tone = max(6, min(140, int(lum * tone_factor)))
-        
-        pts  = _jitter(path, jitter)
+        path_sal = _path_saliency(path, saliency_norm, w, h)
+
+        if path_sal < 0.10:
+            if len(path) < 12:
+                continue
+            tone = random.randint(180, 220)
+            line_w = 1
+        elif path_sal < 0.28:
+            tone = random.randint(120, 160)
+            line_w = 1
+        else:
+            if lum < 40:
+                tone = random.randint(3, 15)
+                line_w = 3
+            elif lum < 90:
+                tone = random.randint(8, 25)
+                line_w = 2
+            elif lum < 150:
+                tone = random.randint(20, 50)
+                line_w = 2
+            else:
+                tone = random.randint(50, 95)
+                line_w = 1
+
+        pts = _jitter(path, jitter)
         if len(pts) > 1:
             for i in range(len(pts) - 1):
-                draw_layer.line([pts[i], pts[i + 1]], fill=(tone, tone, tone), width=1)
-        if idx % eff_batch == 0 or idx == n - 1:
+                draw_layer.line([pts[i], pts[i + 1]], fill=(tone, tone, tone), width=line_w)
+
+        if idx % eff_out == 0 or idx == n_out - 1:
             yield pil_canvas.copy()
 
-    yield pil_canvas.copy()
+    # ── Step 2: Progressively blend the hand-drawn shading (saliency-gated) ───
+    shading_gray = _build_value_shading(gray_raw, saliency_norm)
+    shading_rgb = cv2.cvtColor(shading_gray, cv2.COLOR_GRAY2RGB)
+
+    lines_np = np.array(pil_canvas.convert("RGB"))
+
+    # Transition from pure outlines to shaded drawing in 15 progressive frames
+    steps = 15
+    for step in range(1, steps + 1):
+        alpha = step / float(steps)
+        # Composite shading underneath outline lines
+        shaded_base = cv2.addWeighted(np.full((h, w, 3), 255, dtype=np.uint8), 1.0 - alpha, shading_rgb, alpha, 0)
+        # Multiply outlines on top
+        blended = np.clip((shaded_base.astype(np.float32) / 255.0) * (lines_np.astype(np.float32) / 255.0) * 255.0, 0, 255).astype(np.uint8)
+        yield Image.fromarray(blended)
+
     pil_canvas.close()

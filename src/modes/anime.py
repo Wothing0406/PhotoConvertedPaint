@@ -1,10 +1,11 @@
 """
 modes/anime.py — Anime / Manga Outline (Optimized for clean lines)
 ==================================================================
-Fix: To prevent massive black lines everywhere on complex backgrounds:
-  - We use standard Bilateral Filter (which preserves strong anime outlines).
-  - We simplify XDoG parameters so it only detects primary contours, ignoring tiny texture noise.
-  - Adaptive threshold + morphological cleanup to ensure flat cel shading.
+Approach: TRUE progressive anime/manga drawing flow
+  1. Start with a pure white canvas.
+  2. Progressive redraw of structural lineart contours (black ink strokes)
+     ordered by length (silhouette first).
+  3. Fade in/multiply the flat cel-shaded colors underneath the clean outlines.
 """
 
 import cv2
@@ -16,6 +17,21 @@ from src.gpu_utils import (
     gpu_xdog,
     GPU_AVAILABLE,
 )
+
+
+def _thin_edges(binary_img):
+    element = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
+    skel = np.zeros(binary_img.shape, np.uint8)
+    img = binary_img.copy()
+    for _ in range(15):
+        eroded = cv2.erode(img, element)
+        temp = cv2.dilate(eroded, element)
+        temp = cv2.subtract(img, temp)
+        skel = cv2.bitwise_or(skel, temp)
+        img = eroded.copy()
+        if cv2.countNonZero(img) == 0:
+            break
+    return skel
 
 
 def _jitter(pts, amount: float):
@@ -46,81 +62,58 @@ def draw(
     w, h = pil_img.size
     img_np = np.array(pil_img.convert("RGB"))
 
-    # ── Step 1: Smooth for color fill (Bilateral filters on CPU to preserve cartoon borders) ──
-    # Bilateral smoothing makes colors extremely flat like a real cel-shaded anime frame
+    # ── Step 1: Cel-shaded color fill base ────────────────────────────────────
     smooth = cv2.bilateralFilter(img_np, d=15, sigmaColor=150, sigmaSpace=150)
     smooth = cv2.bilateralFilter(smooth, d=11, sigmaColor=120, sigmaSpace=120)
     smooth = cv2.medianBlur(smooth, 9)
-
-    # ── Step 2: Cel-shade quantization ───────────────────────────────────────
     cel = _cel_quantise(smooth, levels=3)
 
-    # ── Step 3: Clean XDoG edge map (optimized parameters for clean lines) ───
+    # ── Step 2: XDoG edge detection for clean outlines ───────────────────────
     gray_raw = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
-    # Strong edge-preserving smoothing to remove detailed background brush textures
     gray = cv2.bilateralFilter(gray_raw, 11, 80, 80)
 
-    # Sigmas and parameters tuned to detect only clean boundary lines
     sigma1 = max(0.8, blur_size * 0.18)
     sigma2 = sigma1 * 1.6
+    edge_mask = gpu_xdog(gray, sigma1=sigma1, sigma2=sigma2, tau=0.985, phi=16.0, epsilon=-0.05)
+
+    # Clean double outlines and thin to centerline
+    edges = 255 - edge_mask
+    merged = cv2.dilate(edges, cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5)), iterations=1)
+    thinned = _thin_edges(merged)
     
-    # Epsilon = -0.05 targets strong contours, suppressing soft background details
-    edge_mask = gpu_xdog(gray, sigma1=sigma1, sigma2=sigma2,
-                         tau=0.985, phi=16.0, epsilon=-0.05)
-
-    # Draw highlights (Sun orb / eye highlights)
-    try:
-        _, thresh_sun = cv2.threshold(gray_raw, 225, 255, cv2.THRESH_BINARY)
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        thresh_sun = cv2.morphologyEx(thresh_sun, cv2.MORPH_OPEN, kernel)
-        cnts_sun, _ = cv2.findContours(thresh_sun, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-        for cnt in cnts_sun:
-            p_len = cv2.arcLength(cnt, True)
-            if 15 < p_len < (w + h) * 0.5:
-                cv2.drawContours(edge_mask, [cnt], -1, 0, max(1, line_art_width))
-    except Exception as se:
-        print(f"[anime] Sun detection error: {se}")
-
-    # Morphology Cleanup: Perform a Close to fill line gaps, and Open to eliminate speckles
-    # This guarantees solid vector-like lines and zero shading noise
-    kernel_clean = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    edge_mask = cv2.morphologyEx(edge_mask, cv2.MORPH_CLOSE, kernel_clean)
-    edge_mask = cv2.morphologyEx(edge_mask, cv2.MORPH_OPEN, kernel_clean)
-    edge_mask = cv2.medianBlur(edge_mask, 3)
-
     lw = max(1, line_art_width)
     if lw > 1:
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (lw, lw))
-        edge_mask = cv2.erode(edge_mask, kernel, iterations=1)
+        thinned = cv2.dilate(thinned, kernel, iterations=1)
+    edge_mask = 255 - thinned
 
-    # ── Step 4: Build canvas ─────────────────────────────────────────────────
-    canvas_np = cel.copy()
-    ink_mask = (edge_mask == 0)
-    canvas_np[ink_mask] = (15, 15, 20)  # Clean dark anime line color
+    # ── Canvas starts as pure white ───────────────────────────────────────────
+    pil_white = Image.new("RGBA", (w, h), (255, 255, 255, 255))
+    yield pil_white.copy()
 
-    canvas = Image.fromarray(canvas_np)
-    yield canvas.copy()
-
-    # ── Step 5: Progressive redraw of structural contours ────────────────────
+    # ── Step 3: Draw outlines progressively ──────────────────────────────────
     cnts, _ = cv2.findContours(255 - edge_mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-    # Only draw long clean lines
-    cnts_sorted = sorted([c for c in cnts if cv2.arcLength(c, False) > 20], 
+    cnts_sorted = sorted([c for c in cnts if cv2.arcLength(c, False) > 8], 
                          key=lambda c: cv2.arcLength(c, False), reverse=True)
 
-    pil_white = Image.new("RGBA", (w, h), (255, 255, 255, 255))
-    pil_white.paste(Image.fromarray(cel), (0, 0))
     draw_layer = ImageDraw.Draw(pil_white)
-
     n = len(cnts_sorted)
-    eff_batch = max(1, min(batch_size, n // 200)) if n > 0 else batch_size
+    eff_batch = max(1, min(batch_size, max(1, n // 100)))
 
     for idx, cnt in enumerate(cnts_sorted):
         perim = cv2.arcLength(cnt, False)
-        eps = max(0.08, 0.005 * perim)  # Simpler lines (less nodes)
+        eps = max(0.08, 0.005 * perim)
         approx = cv2.approxPolyDP(cnt, eps, False)
         path = [tuple(pt[0]) for pt in approx]
         if len(path) < 2:
             continue
+
+        if perim > 50:
+            area = cv2.contourArea(cnt)
+            if area < perim * 1.5:
+                path = path[:len(path)//2 + 1]
+                if len(path) < 2:
+                    continue
 
         sw = line_art_width if perim > 120 else max(1, line_art_width - 1)
         pts = _jitter(path, jitter * 0.4)
@@ -130,4 +123,33 @@ def draw(
         if idx % eff_batch == 0 or idx == n - 1:
             yield pil_white.copy()
 
-    yield pil_white.copy()
+    # Add eye highlights / sparkle
+    try:
+        _, thresh_eye = cv2.threshold(gray_raw, 222, 255, cv2.THRESH_BINARY)
+        cnts_eye, _ = cv2.findContours(thresh_eye, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+        for cnt in cnts_eye:
+            area = cv2.contourArea(cnt)
+            p_len = cv2.arcLength(cnt, True)
+            if 2 < area < 200 and p_len < 80:
+                approx = cv2.approxPolyDP(cnt, 0.5, True)
+                pts = [tuple(pt[0]) for pt in approx]
+                if len(pts) >= 3:
+                    draw_layer.polygon(pts, fill=(255, 255, 255, 255))
+    except Exception as ee:
+        print(f"[anime] Catchlight failed: {ee}")
+
+    # ── Step 4: Fade in cel-shaded color layer underneath lineart ─────────────
+    lines_rgb = np.array(pil_white.convert("RGB"))
+    cel_rgba = Image.fromarray(cel).convert("RGB")
+    cel_np = np.array(cel_rgba)
+
+    steps = 15
+    for step in range(1, steps + 1):
+        alpha = step / float(steps)
+        # Fade colors in
+        base_color = cv2.addWeighted(np.full((h, w, 3), 255, dtype=np.uint8), 1.0 - alpha, cel_np, alpha, 0)
+        # Multiply lines on top
+        blended = np.clip((base_color.astype(np.float32) / 255.0) * (lines_rgb.astype(np.float32) / 255.0) * 255.0, 0, 255).astype(np.uint8)
+        yield Image.fromarray(blended).convert("RGBA")
+
+    pil_white.close()

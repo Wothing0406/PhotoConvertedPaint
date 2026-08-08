@@ -115,9 +115,8 @@ def progressive_draw_generator(
             if arr.ndim == 3 and arr.shape[2] == 4:
                 w, h = pil_img.size
                 if np.sum(arr[:, :, 3] > 10) > w * h * 0.02:
-                    # Use a warm, neutral paper color background (240, 238, 233) instead of harsh pure white.
-                    # This reduces border contrast spikes so edge detectors don't lose internal details.
-                    bg = Image.new("RGB", removed.size, (240, 238, 233))
+                    # Use a clean, pristine white paper background
+                    bg = Image.new("RGB", removed.size, (255, 255, 255))
                     
                     # Smooth the alpha mask edge slightly using PIL blur to prevent harsh cuts
                     alpha = removed.split()[3]

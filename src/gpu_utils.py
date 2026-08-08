@@ -173,20 +173,53 @@ def gpu_sobel_gradients(gray_np: np.ndarray, blur_k: int = 9):
 
 # ── 10. Saliency Map ──────────────────────────────────────────────────────────
 def gpu_saliency(gray_np: np.ndarray) -> np.ndarray:
-    """Returns (H,W) float32 normalised [0,1]."""
+    """
+    Returns (H,W) float32 normalised [0,1].
+    
+    Strategy: Center-Weighted Saliency Map
+      - Compute frequency-based saliency (DoG: Difference of Gaussians) for subject detection
+      - Multiply with a Gaussian center-weight (subjects are typically in frame center)
+      - This prevents flat-texture backgrounds (walls, tiles) from having high saliency
+        even though they have many edges
+    """
+    h, w = gray_np.shape
+
+    # Difference of Gaussians (DoG) — captures mid-frequency blobs = human subjects
+    blurred_fine = cv2.GaussianBlur(gray_np.astype(np.float32), (5, 5), 1.0)
+    blurred_coarse = cv2.GaussianBlur(gray_np.astype(np.float32), (51, 51), 15.0)
+    dog = np.abs(blurred_fine - blurred_coarse)
+
+    # Smooth DoG to get broad salient regions
+    dog_smooth = cv2.GaussianBlur(dog, (31, 31), 10.0)
+
+    # Center-weight Gaussian: subjects in center get priority over wall edges
+    cy, cx = h / 2.0, w / 2.0
+    ys = np.arange(h, dtype=np.float32)
+    xs = np.arange(w, dtype=np.float32)
+    xg, yg = np.meshgrid(xs, ys)
+    sigma_x = w * 0.40
+    sigma_y = h * 0.42
+    center_weight = np.exp(
+        -((xg - cx)**2 / (2 * sigma_x**2) + (yg - cy)**2 / (2 * sigma_y**2))
+    ).astype(np.float32)
+
+    # Combine: DoG saliency × center weight
+    sal = dog_smooth * center_weight
+
+    # Also add a small edge gradient component for fine line details
     sx = cv2.Scharr(gray_np, cv2.CV_32F, 1, 0)
     sy = cv2.Scharr(gray_np, cv2.CV_32F, 0, 1)
-    sal = cv2.magnitude(sx, sy)
-    if GPU_AVAILABLE:
-        try:
-            s = _cpnd.gaussian_filter(_cp.asarray(sal), sigma=12.0)
-            s_max = float(s.max()) or 1.0
-            return _cp.asnumpy(s / s_max).astype(np.float32)
-        except Exception:
-            pass
-    sal = cv2.GaussianBlur(sal, (25, 25), 0)
-    s_max = sal.max() or 1.0
+    edge_mag = cv2.magnitude(sx, sy)
+    edge_smooth = cv2.GaussianBlur(edge_mag, (21, 21), 6.0)
+    edge_smooth *= center_weight  # gate edge saliency by center weight too
+
+    # Combined: 70% DoG blob + 30% center-gated edges
+    sal = sal * 0.70 + edge_smooth * 0.30
+
+    s_max = float(sal.max()) or 1.0
     return (sal / s_max).astype(np.float32)
+
+
 
 
 # ── 11. Canvas Noise Texture ──────────────────────────────────────────────────
