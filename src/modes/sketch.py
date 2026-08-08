@@ -1,13 +1,14 @@
 """
 modes/sketch.py — Realistic Charcoal/Pencil Sketch
 =====================================================
-Approach: TRUE progressive artist sketch technique
+Approach: TRUE progressive vector-hatching sketch technique
   1. Start with a pure white paper canvas.
-  2. Draw the outline contours first (silhouette & structure) from center-out/outside-in.
-  3. Draw detail lines (features, cloth folds) with fine graphite strokes.
-  4. Fade in the value shading layer (shading, core shadows) progressively *after* outlines
-     are drawn, simulating hand-smudged charcoal or soft graphite shading.
-  5. Saliency gating ensures background walls stay clean white.
+  2. Draw structural outline contours progressively (outside-in / center-out).
+  3. Draw vector-hatching shading strokes progressively:
+     - Short, organic, wiggled pencil strokes (length 8-16px).
+     - No uniform grid: sampled on random grid with angular and positional jitter.
+     - Natural human drawing order: drawn from top-to-bottom to simulate hand shading.
+     - Saliency-gated to keep background pure white.
 """
 
 import cv2
@@ -59,7 +60,7 @@ def _build_contour_paths(gray_bilateral, clo, chi, min_path_len=8):
         p = cv2.arcLength(cnt, False)
         if p < min_path_len:
             continue
-        eps = max(0.3, 0.00015 * p)  # Higher detail resolution
+        eps = max(0.3, 0.00015 * p)
         approx = cv2.approxPolyDP(cnt, eps, False)
         if len(approx) > 1:
             path = [tuple(pt[0]) for pt in approx]
@@ -68,27 +69,53 @@ def _build_contour_paths(gray_bilateral, clo, chi, min_path_len=8):
     return paths
 
 
-def _build_value_shading(gray_raw, saliency_norm):
-    h, w = gray_raw.shape
-    shading = np.full((h, w), 255.0, dtype=np.float32)
-
-    smooth = cv2.GaussianBlur(gray_raw.astype(np.float32), (25, 25), 0)
-    lum = smooth
-
-    if saliency_norm is not None:
-        sal = np.clip((saliency_norm - 0.08) / 0.35, 0, 1)
-    else:
-        sal = np.ones((h, w), dtype=np.float32)
-
-    # Midtone
-    mid_strength = np.clip((220.0 - lum) / (220.0 - 80.0), 0, 1) * sal
-    shading = shading - mid_strength * (255.0 - 155.0)
-
-    # Shadow
-    shadow_strength = np.clip((160.0 - lum) / 160.0, 0, 1) * sal
-    shading = shading - shadow_strength * (shading - 15.0)
-
-    return np.clip(shading, 0, 255).astype(np.uint8)
+def _generate_hatching_strokes(gray_bilateral, saliency_norm, w, h):
+    strokes = []
+    # Dynamic spacing based on image size to balance speed and quality
+    spacing = max(5, min(w, h) // 100)
+    
+    for y in range(spacing // 2, h, spacing):
+        for x in range(spacing // 2, w, spacing):
+            sal = float(saliency_norm[y, x]) if saliency_norm is not None else 1.0
+            if sal < 0.08:
+                continue
+                
+            lum = int(gray_bilateral[y, x])
+            if lum >= 210:
+                continue  # Highlight: leave paper white
+                
+            # Midtone hatching (diagonal 45 degrees)
+            length = random.uniform(8, 16)
+            angle = np.radians(45 + random.uniform(-12, 12))
+            dx = np.cos(angle) * length
+            dy = np.sin(angle) * length
+            
+            x1 = x - dx/2 + random.uniform(-1, 1)
+            y1 = y - dy/2 + random.uniform(-1, 1)
+            x2 = x + dx/2 + random.uniform(-1, 1)
+            y2 = y + dy/2 + random.uniform(-1, 1)
+            
+            tone = random.randint(80, 130) if lum < 120 else random.randint(130, 180)
+            strokes.append(((x1, y1), (x2, y2), tone, 1))
+            
+            # Deep shadow cross-hatching (diagonal 135 degrees)
+            if lum < 120:
+                length_c = random.uniform(6, 12)
+                angle_c = np.radians(135 + random.uniform(-12, 12))
+                dx_c = np.cos(angle_c) * length_c
+                dy_c = np.sin(angle_c) * length_c
+                
+                cx1 = x - dx_c/2 + random.uniform(-1, 1)
+                cy1 = y - dy_c/2 + random.uniform(-1, 1)
+                cx2 = x + dx_c/2 + random.uniform(-1, 1)
+                cy2 = y + dy_c/2 + random.uniform(-1, 1)
+                
+                tone_c = random.randint(30, 80)
+                strokes.append(((cx1, cy1), (cx2, cy2), tone_c, 1))
+                
+    # Sort strokes from top-to-bottom with horizontal jitter to simulate human hand drawing
+    strokes.sort(key=lambda s: s[0][1] + random.uniform(-40, 40))
+    return strokes
 
 
 def _path_saliency(path, saliency_norm, w, h):
@@ -124,19 +151,16 @@ def draw(
     pil_canvas = Image.fromarray(canvas_np)
     yield pil_canvas.copy()
 
-    # ── Step 1: Extract and draw outlines first (No pre-pasted shading) ──────
+    # ── Step 1: Draw outlines progressively ───────────────────────────────────
     clo = max(15, 60 - threshold_c * 5)
     chi = max(45, 140 - threshold_c * 8)
     outlines = _build_contour_paths(gray, clo, chi, min_path_len=8)
 
-    cx0, cy0 = w / 2.0, h / 2.0
-    # Prioritize center subject contours drawing first
+    # Draw primary features/subject first
     outlines.sort(key=lambda p: _path_saliency(p, saliency_norm, w, h), reverse=True)
 
     draw_layer = ImageDraw.Draw(pil_canvas)
-
     n_out = len(outlines)
-    # Scale yield speed to increase frame counts smoothly
     eff_out = max(1, min(batch_size, max(1, n_out // 120)))
 
     for idx, path in enumerate(outlines):
@@ -175,20 +199,23 @@ def draw(
         if idx % eff_out == 0 or idx == n_out - 1:
             yield pil_canvas.copy()
 
-    # ── Step 2: Progressively blend the hand-drawn shading (saliency-gated) ───
-    shading_gray = _build_value_shading(gray_raw, saliency_norm)
-    shading_rgb = cv2.cvtColor(shading_gray, cv2.COLOR_GRAY2RGB)
+    # ── Step 2: Draw organic vector-hatching strokes progressively ────────────
+    hatching_strokes = _generate_hatching_strokes(gray, saliency_norm, w, h)
+    n_hatch = len(hatching_strokes)
+    # Calibrate yielding speed to show drawing process beautifully
+    eff_hatch = max(5, min(batch_size * 5, max(5, n_hatch // 100)))
 
-    lines_np = np.array(pil_canvas.convert("RGB"))
+    for idx, (pt1, pt2, tone, lw) in enumerate(hatching_strokes):
+        # Add a tiny wiggle to shading lines to make them look hand-drawn
+        x1, y1 = pt1
+        x2, y2 = pt2
+        mx = (x1 + x2) / 2 + random.uniform(-0.6, 0.6)
+        my = (y1 + y2) / 2 + random.uniform(-0.6, 0.6)
+        
+        draw_layer.line([pt1, (mx, my), pt2], fill=(tone, tone, tone), width=lw)
+        
+        if idx % eff_hatch == 0 or idx == n_hatch - 1:
+            yield pil_canvas.copy()
 
-    # Transition from pure outlines to shaded drawing in 15 progressive frames
-    steps = 15
-    for step in range(1, steps + 1):
-        alpha = step / float(steps)
-        # Composite shading underneath outline lines
-        shaded_base = cv2.addWeighted(np.full((h, w, 3), 255, dtype=np.uint8), 1.0 - alpha, shading_rgb, alpha, 0)
-        # Multiply outlines on top
-        blended = np.clip((shaded_base.astype(np.float32) / 255.0) * (lines_np.astype(np.float32) / 255.0) * 255.0, 0, 255).astype(np.uint8)
-        yield Image.fromarray(blended)
-
+    yield pil_canvas.copy()
     pil_canvas.close()

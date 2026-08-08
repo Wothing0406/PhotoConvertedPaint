@@ -1,12 +1,14 @@
 """
 modes/pencil.py — Colored Pencil Sketch
 ========================================
-Approach: TRUE progressive colored pencil technique
+Approach: TRUE progressive colored pencil drawing technique
   1. Start with a pure white paper canvas.
   2. Draw color-sampled outline paths progressively (high contrast local colors).
-  3. Draw detail paths progressively.
-  4. Smoothly fade in the color value shading layer + soft underpainting wash
-     underneath the drawn outlines over 15 progressive frames.
+  3. Draw color-sampled vector shading strokes progressively:
+     - Short, wiggled colored pencil lines.
+     - Natural human drawing order: top-to-bottom.
+     - Saliency-gated.
+  4. Fade in a soft, low-contrast color wash underpainting at the end.
   5. Apply linen paper grain texture.
 """
 
@@ -70,39 +72,57 @@ def _build_contour_paths(gray_bilateral, clo, chi, min_path_len=8):
     return paths
 
 
-def _build_color_value_shading(img_rgb, gray_raw, saliency_norm):
-    h, w = gray_raw.shape
-    blur_r = max(15, min(w, h) // 8)
-    blur_k = blur_r * 2 + 1
-    color_blurred = cv2.GaussianBlur(img_rgb, (blur_k, blur_k), 0).astype(np.float32)
-    smooth_lum = cv2.GaussianBlur(gray_raw.astype(np.float32), (25, 25), 0)
-
-    if saliency_norm is not None:
-        sal = np.clip((saliency_norm - 0.08) / 0.35, 0, 1)
-    else:
-        sal = np.ones((h, w), dtype=np.float32)
-
-    result = np.full((h, w, 3), 255.0, dtype=np.float32)
-
-    # Midtone
-    mid_strength = np.clip((220.0 - smooth_lum) / (220.0 - 80.0), 0, 1) * sal
-    mid_color = np.clip(color_blurred * 0.70 + 80.0, 0, 255)
-    for c in range(3):
-        result[:, :, c] = (
-            result[:, :, c] * (1.0 - mid_strength * 0.60)
-            + mid_color[:, :, c] * (mid_strength * 0.60)
-        )
-
-    # Shadow
-    shadow_strength = np.clip((160.0 - smooth_lum) / 160.0, 0, 1) * sal
-    dark_color = np.clip(color_blurred * 0.22, 0, 255)
-    for c in range(3):
-        result[:, :, c] = (
-            result[:, :, c] * (1.0 - shadow_strength)
-            + dark_color[:, :, c] * shadow_strength
-        )
-
-    return np.clip(result, 0, 255).astype(np.uint8)
+def _generate_color_hatching_strokes(img_rgb, gray_bilateral, saliency_norm, w, h):
+    strokes = []
+    spacing = max(5, min(w, h) // 100)
+    
+    for y in range(spacing // 2, h, spacing):
+        for x in range(spacing // 2, w, spacing):
+            sal = float(saliency_norm[y, x]) if saliency_norm is not None else 1.0
+            if sal < 0.08:
+                continue
+                
+            lum = int(gray_bilateral[y, x])
+            if lum >= 210:
+                continue
+                
+            c_sampled = img_rgb[y, x].astype(np.float32)
+            
+            # Midtone hatching (diagonal 45 degrees)
+            length = random.uniform(8, 16)
+            angle = np.radians(45 + random.uniform(-12, 12))
+            dx = np.cos(angle) * length
+            dy = np.sin(angle) * length
+            
+            x1 = x - dx/2 + random.uniform(-1, 1)
+            y1 = y - dy/2 + random.uniform(-1, 1)
+            x2 = x + dx/2 + random.uniform(-1, 1)
+            y2 = y + dy/2 + random.uniform(-1, 1)
+            
+            stroke_factor = 0.35 + 0.25 * (lum / 255.0)
+            stroke_rgb = tuple(max(10, int(c * stroke_factor)) for c in c_sampled)
+            
+            strokes.append(((x1, y1), (x2, y2), stroke_rgb, 1))
+            
+            # Deep shadow cross-hatching (diagonal 135 degrees)
+            if lum < 120:
+                length_c = random.uniform(6, 12)
+                angle_c = np.radians(135 + random.uniform(-12, 12))
+                dx_c = np.cos(angle_c) * length_c
+                dy_c = np.sin(angle_c) * length_c
+                
+                cx1 = x - dx_c/2 + random.uniform(-1, 1)
+                cy1 = y - dy_c/2 + random.uniform(-1, 1)
+                cx2 = x + dx_c/2 + random.uniform(-1, 1)
+                cy2 = y + dy_c/2 + random.uniform(-1, 1)
+                
+                stroke_factor_c = 0.20 + 0.15 * (lum / 255.0)
+                stroke_rgb_c = tuple(max(5, int(c * stroke_factor_c)) for c in c_sampled)
+                
+                strokes.append(((cx1, cy1), (cx2, cy2), stroke_rgb_c, 1))
+                
+    strokes.sort(key=lambda s: s[0][1] + random.uniform(-40, 40))
+    return strokes
 
 
 def _path_saliency(path, saliency_norm, w, h):
@@ -138,12 +158,11 @@ def draw(
     canvas = Image.new("RGBA", (w, h), (255, 255, 255, 255))
     yield canvas.copy()
 
-    # ── Step 1: Extract and draw outline paths progressively ──────────────────
+    # ── Step 1: Draw outline paths progressively ──────────────────────────────
     clo = max(15, 60 - threshold_c * 5)
     chi = max(45, 140 - threshold_c * 8)
     paths = _build_contour_paths(gray, clo, chi, min_path_len=8)
 
-    cx0, cy0 = w / 2.0, h / 2.0
     paths.sort(key=lambda p: _path_saliency(p, saliency_norm, w, h), reverse=True)
 
     draw_layer = ImageDraw.Draw(canvas)
@@ -192,33 +211,39 @@ def draw(
         if idx % eff_out == 0 or idx == n_out - 1:
             yield canvas.copy()
 
-    # ── Step 2: Build underpainting & color value shading layers ──────────────
-    # Underpainting wash base
+    # ── Step 2: Draw color hatching strokes progressively ────────────────────
+    hatching_strokes = _generate_color_hatching_strokes(img_np, gray, saliency_norm, w, h)
+    n_hatch = len(hatching_strokes)
+    eff_hatch = max(5, min(batch_size * 5, max(5, n_hatch // 100)))
+
+    for idx, (pt1, pt2, stroke_rgb, lw) in enumerate(hatching_strokes):
+        x1, y1 = pt1
+        x2, y2 = pt2
+        mx = (x1 + x2) / 2 + random.uniform(-0.6, 0.6)
+        my = (y1 + y2) / 2 + random.uniform(-0.6, 0.6)
+        
+        draw_layer.line([pt1, (mx, my), pt2], fill=(*stroke_rgb, 255), width=lw)
+        
+        if idx % eff_hatch == 0 or idx == n_hatch - 1:
+            yield canvas.copy()
+
+    # ── Step 3: Fade in color wash base under outlines at the end ─────────────
+    lines_np = np.array(canvas.convert("RGB"))
+    
     blur_r = max(20, min(w, h) // 5)
     washed = np.array(
         pil_img.convert("RGB").filter(ImageFilter.GaussianBlur(radius=blur_r))
     ).astype(np.float32)
-    wash_blended = np.clip(255.0 * 0.60 + washed * 0.40, 0, 255)
-
-    # Shading overlay
-    shading_rgb = _build_color_value_shading(img_np, gray_raw, saliency_norm).astype(np.float32)
-
-    # Composite wash + shading
-    combined_color = np.clip(wash_blended * 0.30 + shading_rgb * 0.70, 0, 255).astype(np.uint8)
-
-    # ── Step 3: Progressively blend colors under outlines (15 frames) ─────────
-    lines_np = np.array(canvas.convert("RGB"))
+    wash_blended = np.clip(255.0 * 0.60 + washed * 0.40, 0, 255).astype(np.uint8)
 
     steps = 15
     for step in range(1, steps + 1):
         alpha = step / float(steps)
-        # Fade colors in
-        base_color = cv2.addWeighted(np.full((h, w, 3), 255, dtype=np.uint8), 1.0 - alpha, combined_color, alpha, 0)
-        # Multiply lines on top
+        base_color = cv2.addWeighted(np.full((h, w, 3), 255, dtype=np.uint8), 1.0 - alpha, wash_blended, alpha, 0)
         blended = np.clip((base_color.astype(np.float32) / 255.0) * (lines_np.astype(np.float32) / 255.0) * 255.0, 0, 255).astype(np.uint8)
         yield Image.fromarray(blended).convert("RGBA")
 
-    # Final step: paper texture
+    # Paper texture
     try:
         final_canvas = Image.fromarray(blended).convert("RGBA")
         canvas_tex = gpu_canvas_texture(w, h)
