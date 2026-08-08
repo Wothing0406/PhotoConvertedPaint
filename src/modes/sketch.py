@@ -1,14 +1,19 @@
 """
 modes/sketch.py — Realistic Charcoal/Pencil Sketch
 =====================================================
-Approach: TRUE progressive vector-hatching sketch technique
+Approach: MASTER progressive sketching technique
   1. Start with a pure white paper canvas.
-  2. Draw structural outline contours progressively (outside-in / center-out).
-  3. Draw vector-hatching shading strokes progressively:
-     - Short, organic, wiggled pencil strokes (length 8-16px).
-     - No uniform grid: sampled on random grid with angular and positional jitter.
-     - Natural human drawing order: drawn from top-to-bottom to simulate hand shading.
-     - Saliency-gated to keep background pure white.
+  2. Single-line outline extraction:
+     - Hessian Ridge Detection for single centerlines of dark features (hair, eyes, eyebrows).
+     - XDoG/Canny boundaries thinned using a large 9x9 merge kernel to eliminate double borders.
+     - Smooth path coordinates using moving average to remove step jaggies.
+     - No jitter on subject/face (sal > 0.20) to prevent facial distortion.
+  3. Cross-Contour Hatching:
+     - Short shading strokes oriented along the tangent of local gradients (flows along hair and curves).
+     - Skip skin highlights (sal > 0.45 and lum > 140) to keep the face clean and bright.
+     - Deep black strokes (tone 2-15, width 2) in hair and dark clothing for high contrast.
+  4. Eye Catchlight Protection:
+     - High-salient white spots from original image are preserved as pure white paper highlights.
 """
 
 import cv2
@@ -26,10 +31,24 @@ from src.gpu_utils import (
 def _jitter(pts, amount: float):
     result, dx, dy = [], 0.0, 0.0
     for x, y in pts:
-        dx = 0.82 * dx + 0.18 * random.gauss(0, amount * 1.8)
-        dy = 0.82 * dy + 0.18 * random.gauss(0, amount * 1.8)
+        dx = 0.82 * dx + 0.18 * random.gauss(0, amount * 1.5)
+        dy = 0.82 * dy + 0.18 * random.gauss(0, amount * 1.5)
         result.append((x + dx, y + dy))
     return result
+
+
+def _smooth_path(path, window_size=3):
+    if len(path) < window_size:
+        return path
+    smoothed = []
+    for i in range(len(path)):
+        start = max(0, i - window_size // 2)
+        end = min(len(path), i + window_size // 2 + 1)
+        window = path[start:end]
+        xs = [pt[0] for pt in window]
+        ys = [pt[1] for pt in window]
+        smoothed.append((sum(xs)/len(window), sum(ys)/len(window)))
+    return smoothed
 
 
 def _thin_edges(binary_img):
@@ -47,32 +66,53 @@ def _thin_edges(binary_img):
     return skel
 
 
-def _build_contour_paths(gray_bilateral, clo, chi, min_path_len=8):
-    edges = cv2.Canny(gray_bilateral, clo, chi)
-    close_k = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, close_k)
-    merge_k = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+def _build_contour_paths(gray, saliency_norm, clo, chi, min_path_len=8):
+    h, w = gray.shape
+
+    # 1. Hessian Ridge Detection for centerlines of dark lines (eyebrows, hair, eyes)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0.8)
+    Ixx = cv2.Sobel(blurred, cv2.CV_32F, 2, 0, ksize=3)
+    Iyy = cv2.Sobel(blurred, cv2.CV_32F, 0, 2, ksize=3)
+    Ixy = cv2.Sobel(blurred, cv2.CV_32F, 1, 1, ksize=3)
+    val = 0.5 * (Ixx + Iyy + np.sqrt((Ixx - Iyy)**2 + 4 * Ixy**2))
+    
+    ridges = np.zeros_like(gray, dtype=np.uint8)
+    ridges[val > 5.0] = 255
+
+    # 2. Boundary detection
+    edges = cv2.Canny(gray, clo, chi)
+    
+    # Dilate with a larger 9x9 kernel to merge double borders up to 8px apart
+    merge_k = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9))
     merged = cv2.dilate(edges, merge_k, iterations=1)
-    thinned = _thin_edges(merged)
+    
+    # Combine ridges and thinned edges
+    combined = cv2.bitwise_or(merged, ridges)
+    thinned = _thin_edges(combined)
+    
     cnts, _ = cv2.findContours(thinned, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
     paths = []
     for cnt in cnts:
         p = cv2.arcLength(cnt, False)
         if p < min_path_len:
             continue
-        eps = max(0.3, 0.00015 * p)
-        approx = cv2.approxPolyDP(cnt, eps, False)
+        approx = cv2.approxPolyDP(cnt, 0.4, False)
         if len(approx) > 1:
             path = [tuple(pt[0]) for pt in approx]
             if len(path) > 1:
-                paths.append(path)
+                smoothed = _smooth_path(path, window_size=3)
+                paths.append(smoothed)
     return paths
 
 
-def _generate_hatching_strokes(gray_bilateral, saliency_norm, w, h):
+def _generate_cross_contour_hatching(gray, saliency_norm, w, h):
     strokes = []
-    # Dynamic spacing based on image size to balance speed and quality
-    spacing = max(5, min(w, h) // 100)
+    spacing = max(6, min(w, h) // 90)
+    
+    # Smooth gradients to find clean tangent flows
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    sobelx = cv2.Sobel(blurred, cv2.CV_32F, 1, 0, ksize=3)
+    sobely = cv2.Sobel(blurred, cv2.CV_32F, 0, 1, ksize=3)
     
     for y in range(spacing // 2, h, spacing):
         for x in range(spacing // 2, w, spacing):
@@ -80,41 +120,59 @@ def _generate_hatching_strokes(gray_bilateral, saliency_norm, w, h):
             if sal < 0.08:
                 continue
                 
-            lum = int(gray_bilateral[y, x])
-            if lum >= 210:
-                continue  # Highlight: leave paper white
+            lum = int(gray[y, x])
+            if lum >= 205:
+                continue  # Highlight: keep paper white
                 
-            # Midtone hatching (diagonal 45 degrees)
-            length = random.uniform(8, 16)
-            angle = np.radians(45 + random.uniform(-12, 12))
-            dx = np.cos(angle) * length
-            dy = np.sin(angle) * length
+            # Gate shading on face skin to keep it bright and clean
+            if sal > 0.45 and lum > 140:
+                continue
+                
+            # Compute tangent flow direction
+            dx = sobelx[y, x]
+            dy = sobely[y, x]
+            mag = np.sqrt(dx**2 + dy**2)
             
-            x1 = x - dx/2 + random.uniform(-1, 1)
-            y1 = y - dy/2 + random.uniform(-1, 1)
-            x2 = x + dx/2 + random.uniform(-1, 1)
-            y2 = y + dy/2 + random.uniform(-1, 1)
+            if mag > 5.0:
+                angle = np.arctan2(dy, dx) + np.pi / 2.0
+            else:
+                angle = np.radians(45.0)
+                
+            angle += np.radians(random.uniform(-10, 10))
             
-            tone = random.randint(80, 130) if lum < 120 else random.randint(130, 180)
-            strokes.append(((x1, y1), (x2, y2), tone, 1))
-            
-            # Deep shadow cross-hatching (diagonal 135 degrees)
-            if lum < 120:
-                length_c = random.uniform(6, 12)
-                angle_c = np.radians(135 + random.uniform(-12, 12))
-                dx_c = np.cos(angle_c) * length_c
-                dy_c = np.sin(angle_c) * length_c
+            # Shading size & density
+            if lum < 80:
+                # Deep shadow: cross-hatching for high contrast
+                lengths = [random.uniform(10, 18), random.uniform(8, 14)]
+                angles = [angle, angle + np.pi / 2.0]
+            else:
+                # Midtone: single hatching
+                lengths = [random.uniform(8, 14)]
+                angles = [angle]
                 
-                cx1 = x - dx_c/2 + random.uniform(-1, 1)
-                cy1 = y - dy_c/2 + random.uniform(-1, 1)
-                cx2 = x + dx_c/2 + random.uniform(-1, 1)
-                cy2 = y + dy_c/2 + random.uniform(-1, 1)
+            for L, ang in zip(lengths, angles):
+                cos_a = np.cos(ang)
+                sin_a = np.sin(ang)
+                x1 = x - cos_a * L / 2.0 + random.uniform(-0.5, 0.5)
+                y1 = y - sin_a * L / 2.0 + random.uniform(-0.5, 0.5)
+                x2 = x + cos_a * L / 2.0 + random.uniform(-0.5, 0.5)
+                y2 = y + sin_a * L / 2.0 + random.uniform(-0.5, 0.5)
                 
-                tone_c = random.randint(30, 80)
-                strokes.append(((cx1, cy1), (cx2, cy2), tone_c, 1))
+                # Dynamic contrast and line weight
+                if lum < 50:
+                    tone = random.randint(2, 12)  # Deep black
+                    lw = 2
+                elif lum < 100:
+                    tone = random.randint(12, 40)
+                    lw = 2 if random.random() > 0.6 else 1
+                else:
+                    tone = random.randint(50, 100)
+                    lw = 1
+                    
+                strokes.append(((x1, y1), (x2, y2), tone, lw, y))
                 
-    # Sort strokes from top-to-bottom with horizontal jitter to simulate human hand drawing
-    strokes.sort(key=lambda s: s[0][1] + random.uniform(-40, 40))
+    # Sort top-to-bottom
+    strokes.sort(key=lambda s: s[4] + random.uniform(-30, 30))
     return strokes
 
 
@@ -146,17 +204,21 @@ def draw(
     gray = cv2.bilateralFilter(gray_raw, 7, 30, 30)
     saliency_norm = gpu_saliency(gray_raw)
 
+    # Detect original highlights (catchlights) to preserve
+    highlight_mask = (gray_raw > 225) & (saliency_norm > 0.35)
+    highlight_mask = cv2.dilate(highlight_mask.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
+
     # ── Canvas starts as pure white paper ─────────────────────────────────────
     canvas_np = np.full((h, w, 3), 255, dtype=np.uint8)
     pil_canvas = Image.fromarray(canvas_np)
     yield pil_canvas.copy()
 
-    # ── Step 1: Draw outlines progressively ───────────────────────────────────
+    # ── Step 1: Draw outline contours (No double borders, no face jitter) ─────
     clo = max(15, 60 - threshold_c * 5)
     chi = max(45, 140 - threshold_c * 8)
-    outlines = _build_contour_paths(gray, clo, chi, min_path_len=8)
+    outlines = _build_contour_paths(gray, saliency_norm, clo, chi, min_path_len=8)
 
-    # Draw primary features/subject first
+    # Draw primary features first
     outlines.sort(key=lambda p: _path_saliency(p, saliency_norm, w, h), reverse=True)
 
     draw_layer = ImageDraw.Draw(pil_canvas)
@@ -179,43 +241,53 @@ def draw(
             line_w = 1
         else:
             if lum < 40:
-                tone = random.randint(3, 15)
+                tone = random.randint(2, 10)  # Darker lines
                 line_w = 3
             elif lum < 90:
-                tone = random.randint(8, 25)
+                tone = random.randint(5, 20)
                 line_w = 2
             elif lum < 150:
-                tone = random.randint(20, 50)
+                tone = random.randint(15, 40)
                 line_w = 2
             else:
-                tone = random.randint(50, 95)
+                tone = random.randint(40, 85)
                 line_w = 1
 
-        pts = _jitter(path, jitter)
+        # Only add jitter to background elements; keep face/subject precise
+        pts = _jitter(path, jitter) if path_sal < 0.20 else path
+        
         if len(pts) > 1:
             for i in range(len(pts) - 1):
                 draw_layer.line([pts[i], pts[i + 1]], fill=(tone, tone, tone), width=line_w)
 
         if idx % eff_out == 0 or idx == n_out - 1:
-            yield pil_canvas.copy()
+            # Yield with highlights preserved
+            canvas_copy = pil_canvas.copy()
+            copy_np = np.array(canvas_copy)
+            copy_np[highlight_mask > 0] = [255, 255, 255]
+            yield Image.fromarray(copy_np)
 
-    # ── Step 2: Draw organic vector-hatching strokes progressively ────────────
-    hatching_strokes = _generate_hatching_strokes(gray, saliency_norm, w, h)
+    # ── Step 2: Draw organic cross-contour hatching strokes ───────────────────
+    hatching_strokes = _generate_cross_contour_hatching(gray, saliency_norm, w, h)
     n_hatch = len(hatching_strokes)
-    # Calibrate yielding speed to show drawing process beautifully
     eff_hatch = max(5, min(batch_size * 5, max(5, n_hatch // 100)))
 
-    for idx, (pt1, pt2, tone, lw) in enumerate(hatching_strokes):
-        # Add a tiny wiggle to shading lines to make them look hand-drawn
+    for idx, (pt1, pt2, tone, lw, _) in enumerate(hatching_strokes):
         x1, y1 = pt1
         x2, y2 = pt2
-        mx = (x1 + x2) / 2 + random.uniform(-0.6, 0.6)
-        my = (y1 + y2) / 2 + random.uniform(-0.6, 0.6)
+        mx = (x1 + x2) / 2 + random.uniform(-0.4, 0.4)
+        my = (y1 + y2) / 2 + random.uniform(-0.4, 0.4)
         
         draw_layer.line([pt1, (mx, my), pt2], fill=(tone, tone, tone), width=lw)
         
         if idx % eff_hatch == 0 or idx == n_hatch - 1:
-            yield pil_canvas.copy()
+            canvas_copy = pil_canvas.copy()
+            copy_np = np.array(canvas_copy)
+            copy_np[highlight_mask > 0] = [255, 255, 255]
+            yield Image.fromarray(copy_np)
 
-    yield pil_canvas.copy()
+    # Final yield with highlights
+    final_np = np.array(pil_canvas)
+    final_np[highlight_mask > 0] = [255, 255, 255]
+    yield Image.fromarray(final_np)
     pil_canvas.close()
