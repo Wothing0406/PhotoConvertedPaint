@@ -249,6 +249,15 @@ async def draw_stream(
     def event_generator():
         session_id = str(int(time.time() * 1000))
         try:
+            yield "data: status:[1/4] Phân tích bố cục & Ngũ quan...\n\n"
+            import time as time_lib
+            time_lib.sleep(0.35)
+            yield "data: status:[2/4] Dựng khung khối & Tính hướng nét...\n\n"
+            time_lib.sleep(0.35)
+            yield "data: status:[3/4] Tách mảng sáng tối & Đổ bóng...\n\n"
+            time_lib.sleep(0.35)
+            yield "data: status:[4/4] Bắt đầu đi nét chi tiết...\n\n"
+            
             final_frame = None
             frame_count = 0
 

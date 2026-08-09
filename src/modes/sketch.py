@@ -172,9 +172,17 @@ def _draw_tapered_line(draw_layer, pts, base_tone, base_width):
         draw_layer.line([pts[i], pts[i+1]], fill=(tone_val, tone_val, tone_val, 255), width=int(round(w)))
 
 
-def _generate_cross_contour_hatching(gray, saliency_norm, w, h, hatching_intensity, fc, R, shading_flow_angle=45.0, bg_hatching_angle=135.0):
+def _generate_cross_contour_hatching(gray, saliency_norm, w, h, hatching_intensity, fc, R, shading_flow_angle=45.0, bg_hatching_angle=135.0, **kw):
     strokes = []
     spacing = max(12, min(w, h) // 80)
+    
+    # 1. Semantic Masking: extract facial landmarks coordinates to protect eyes, nose, mouth
+    eye_l = (float(kw.get("eye_left_x", 0.43)) * w, float(kw.get("eye_left_y", 0.38)) * h)
+    eye_r = (float(kw.get("eye_right_x", 0.57)) * w, float(kw.get("eye_right_y", 0.38)) * h)
+    nose_x = fc[0]
+    nose_y = fc[1] + (eye_l[1] - fc[1]) * 0.4
+    mouth_x = fc[0]
+    mouth_y = fc[1] + R * 0.32
     
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
     sobelx = cv2.Sobel(blurred, cv2.CV_32F, 1, 0, ksize=3)
@@ -187,6 +195,16 @@ def _generate_cross_contour_hatching(gray, saliency_norm, w, h, hatching_intensi
                 continue
                 
             dist = np.sqrt((x - fc[0])**2 + (y - fc[1])**2)
+            
+            # Banned hatching on key facial landmarks to preserve clarity and character likeness
+            if dist < R:
+                dist_l = np.sqrt((x - eye_l[0])**2 + (y - eye_l[1])**2)
+                dist_r = np.sqrt((x - eye_r[0])**2 + (y - eye_r[1])**2)
+                dist_m = np.sqrt((x - mouth_x)**2 + (y - mouth_y)**2)
+                dist_n = np.sqrt((x - nose_x)**2 + (y - nose_y)**2)
+                if dist_l < R * 0.16 or dist_r < R * 0.16 or dist_m < R * 0.16 or dist_n < R * 0.14:
+                    continue
+            
             sal = float(saliency_norm[y, x]) if saliency_norm is not None else 1.0
             
             # If it's a dark shadow region (e.g. hair, dark clothes, shadow folds),
@@ -374,7 +392,9 @@ def draw(
     # Hatching splits
     shading_angle = float(kw.get("shading_flow_angle", 45.0))
     bg_angle = float(kw.get("bg_hatching_angle", 135.0))
-    all_hatching = _generate_cross_contour_hatching(gray, saliency_norm, w, h, hatching, fc, R, shading_angle, bg_angle)
+    # Extract from kw to avoid duplicates during unpacking
+    hatching_kw = {k: v for k, v in kw.items() if k not in ["shading_flow_angle", "bg_hatching_angle"]}
+    all_hatching = _generate_cross_contour_hatching(gray, saliency_norm, w, h, hatching, fc, R, shading_angle, bg_angle, **hatching_kw)
     dark_hatching = [h for h in all_hatching if h[5] < 85]
     midtone_hatching = [h for h in all_hatching if h[5] >= 85]
 

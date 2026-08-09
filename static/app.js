@@ -312,6 +312,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
                         if (payload.startsWith("error:")) {
                             statusBox.innerText = `❌ Lỗi: ${payload.substring(6)}`;
+                        } else if (payload.startsWith("status:")) {
+                            statusBox.innerText = `${explanationText}${payload.substring(7)}`;
                         } else if (payload.startsWith("done:")) {
                             const total = parseInt(payload.substring(5));
                             statusBox.innerText = `${explanationText}✅ Hoàn tất ${total} khung hình. Đang đóng gói ZIP...`;
