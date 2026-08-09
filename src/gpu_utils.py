@@ -90,25 +90,52 @@ def gpu_canny(gray_np: np.ndarray, lo: float, hi: float, blur_k: int = 3) -> np.
 
 # ── 5. Pencil Dodge Blend ─────────────────────────────────────────────────────
 def gpu_pencil_dodge(gray_np: np.ndarray, blur_r: int) -> np.ndarray:
-    b = max(3, (blur_r * 4 + 1) | 1)
-    sig = 0.3 * ((b - 1) * 0.5 - 1) + 0.8
+    # Fine scale for sharp details/contours
+    b_fine = max(3, (blur_r * 4 + 1) | 1)
+    sig_fine = 0.3 * ((b_fine - 1) * 0.5 - 1) + 0.8
+    
+    # Coarse scale for large graphite shading/cushioning (di chì / đồ chì nền)
+    sig_coarse = max(15.0, sig_fine * 6.5)
+    b_coarse = int(sig_coarse * 6 + 1) | 1
 
     if GPU_AVAILABLE:
         try:
             g = _cp.asarray(gray_np.astype(_cp.float32))
             inv = 255.0 - g
-            blur_inv = _cpnd.gaussian_filter(inv, sigma=sig)
-            sketch = _cp.where(blur_inv >= 255, 255.0,
-                               _cp.clip(g / (1.0 - blur_inv/255.0 + 1e-7), 0, 255))
-            return _cp.asnumpy(sketch).astype(np.uint8)
+            
+            # Fine dodge
+            blur_inv_fine = _cpnd.gaussian_filter(inv, sigma=sig_fine)
+            sketch_fine = _cp.where(blur_inv_fine >= 255, 255.0,
+                                   _cp.clip(g / (1.0 - blur_inv_fine/255.0 + 1e-7), 0, 255))
+            
+            # Coarse dodge
+            blur_inv_coarse = _cpnd.gaussian_filter(inv, sigma=sig_coarse)
+            sketch_coarse = _cp.where(blur_inv_coarse >= 255, 255.0,
+                                     _cp.clip(g / (1.0 - blur_inv_coarse/255.0 + 1e-7), 0, 255))
+            
+            # Blend: 45% fine details + 55% coarse shading (cushions large structures like walls/clothes)
+            blended = 0.45 * sketch_fine + 0.55 * sketch_coarse
+            return _cp.asnumpy(blended).astype(np.uint8)
         except Exception:
             pass
+
     inv = 255.0 - gray_np.astype(np.float32)
-    blur_inv = cv2.GaussianBlur(inv, (b, b), 0)
-    return np.clip(
-        np.where(blur_inv >= 255, 255, gray_np.astype(np.float32) / (1.0 - blur_inv/255.0 + 1e-7)),
+    # Fine
+    blur_inv_fine = cv2.GaussianBlur(inv, (b_fine, b_fine), 0)
+    sketch_fine = np.clip(
+        np.where(blur_inv_fine >= 255, 255, gray_np.astype(np.float32) / (1.0 - blur_inv_fine/255.0 + 1e-7)),
         0, 255
-    ).astype(np.uint8)
+    )
+    # Coarse
+    b_coarse_clamped = min(101, b_coarse | 1)
+    blur_inv_coarse = cv2.GaussianBlur(inv, (b_coarse_clamped, b_coarse_clamped), 0)
+    sketch_coarse = np.clip(
+        np.where(blur_inv_coarse >= 255, 255, gray_np.astype(np.float32) / (1.0 - blur_inv_coarse/255.0 + 1e-7)),
+        0, 255
+    )
+    
+    blended = 0.45 * sketch_fine + 0.55 * sketch_coarse
+    return blended.astype(np.uint8)
 
 
 def gpu_pencil_dodge_channel(ch_np: np.ndarray, blur_r: int) -> np.ndarray:

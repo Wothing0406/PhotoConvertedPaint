@@ -92,8 +92,8 @@ def draw(
     yield pil_canvas.copy()
     pil_canvas.close()
 
-    # ── Layer 3: Tonal shadow darkening (GPU) ────────────────────────────────
-    dark_raw = (gray < 85).astype(np.uint8) * 255
+    # Use continuous luminance invert to allow midtones (like walls, sky, objects) to get pencil smudging/shading (di chì)
+    dark_raw = 255.0 - gray.astype(np.float32)
     dark_mask = gpu_gaussian_blur(dark_raw, 19).astype(np.float32) / 255.0   # GPU
 
     shadow_strength = _kw.get("shadow_strength", 0.35)

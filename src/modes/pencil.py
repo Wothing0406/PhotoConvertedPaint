@@ -138,7 +138,7 @@ def draw(
 
     # ── Layer 3: Crosshatch in shadow zones ──────────────────────────────────
     spacing     = max(8, min(w, h) // 65)
-    hatch_lines = _hatch_shadow(gray, spacing=spacing, dark_thresh=75, angle=45)
+    hatch_lines = _hatch_shadow(gray, spacing=spacing, dark_thresh=150, angle=45)
 
     draw_layer = ImageDraw.Draw(canvas)
     for idx, hatch in enumerate(hatch_lines):
