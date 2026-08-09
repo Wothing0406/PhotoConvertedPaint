@@ -103,11 +103,10 @@ def _build_contour_paths(gray, saliency_norm, clo, chi, fc, R):
     focal_mask = np.clip(1.0 - (dists - R) / R, 0.0, 1.0)
     focal_mask = cv2.GaussianBlur(focal_mask, (21, 21), 0)
     
-    # Create heavily smoothed background image
-    bg_smooth = cv2.bilateralFilter(gray, d=17, sigmaColor=120, sigmaSpace=120)
-    bg_smooth = cv2.GaussianBlur(bg_smooth, (9, 9), 0)
+    # Create mildly smoothed background image to preserve architectural and scenery details
+    bg_smooth = cv2.bilateralFilter(gray, d=5, sigmaColor=35, sigmaSpace=35)
     
-    # Combine sharp face and smooth background
+    # Combine sharp face and background
     hybrid_gray = (gray.astype(np.float32) * focal_mask + bg_smooth.astype(np.float32) * (1.0 - focal_mask)).astype(np.uint8)
 
     # Now extract edges from the hybrid image
@@ -210,8 +209,8 @@ def _generate_cross_contour_hatching(gray, saliency_norm, w, h, hatching_intensi
             # If it's a dark shadow region (e.g. hair, dark clothes, shadow folds),
             # we ALWAYS hatch it to build the dark values of the sketch, bypassing saliency gating.
             if lum >= 85:
-                # For midtones/lights, we use saliency gating to keep background clean
-                sal_thresh = 0.20 if dist < R else 0.45
+                # Lower the threshold to allow beautiful background shading and scenery details
+                sal_thresh = 0.20 if dist < R else 0.22
                 if sal < sal_thresh:
                     continue
                     
