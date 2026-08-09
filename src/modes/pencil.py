@@ -107,6 +107,9 @@ def draw(
 
     blur_r = max(14, min(w, h) // 8)
     washed_pil  = pil_img.convert("RGB").filter(ImageFilter.GaussianBlur(radius=blur_r))
+    from PIL import ImageEnhance
+    # Boost color saturation by 1.6x to make colored pencil shades pop vibrantly
+    washed_pil = ImageEnhance.Color(washed_pil).enhance(1.6)
     washed_rgba = washed_pil.convert("RGBA")
     washed_pil.close()
 
@@ -147,8 +150,8 @@ def draw(
         
         # Calculate local luminance to determine shading factor dynamically
         lum = int(gray[sy, sx])
-        # Dark areas get deeper colors (30%-45%), light areas get softer tints (55%-65%)
-        shade_factor = 0.35 + 0.30 * (lum / 255.0)
+        # Dark areas get deeper colors (65%-75%), light areas get softer tints (85%-95%)
+        shade_factor = 0.65 + 0.30 * (lum / 255.0)
         shade = tuple(max(0, int(c * shade_factor)) for c in c_sampled)
         
         pts   = _jitter(hatch, jitter * 0.5)
@@ -188,13 +191,13 @@ def draw(
         
         # Calculate local luminance for contour stroke weight
         lum = int(gray[sy, sx])
-        stroke_factor = 0.28 + 0.32 * (lum / 255.0)
+        stroke_factor = 0.55 + 0.40 * (lum / 255.0)
         stroke = tuple(max(0, int(c * stroke_factor)) for c in c_sampled)
         
         pts    = _jitter(path, jitter)
         if len(pts) > 1:
             for i in range(len(pts) - 1):
-                draw_layer.line([pts[i], pts[i + 1]], fill=(*stroke, 150), width=1)
+                draw_layer.line([pts[i], pts[i + 1]], fill=(*stroke, 200), width=1)
         if idx % eff_batch == 0 or idx == len(paths) - 1:
             yield canvas.copy()
 
