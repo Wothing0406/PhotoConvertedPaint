@@ -178,8 +178,19 @@ def draw(
         if idx % eff_n == 0 or idx == len(regions) - 1:
             frame_img = paper_base.copy()
             frame_img.paste(draft_canvas, (0, 0), mask=draft_canvas.split()[3])
-            frame_img.paste(drawing_canvas, (0, 0), mask=drawing_canvas.split()[3])
             yield frame_img.copy()
+
+    # Save the blank printable blueprint sheet (outlines + numbers on warm white paper)
+    session_id = kw.get("session_id")
+    if session_id:
+        try:
+            sheet_img = paper_base.copy()
+            sheet_img.paste(drawing_canvas, (0, 0), mask=drawing_canvas.split()[3])
+            sheet_img.convert("RGB").save(f"output/blueprint_{session_id}.png")
+            sheet_img.close()
+            print(f"[Blueprint] Saved blank blueprint sheet: output/blueprint_{session_id}.png")
+        except Exception as e:
+            print(f"[Blueprint] Error saving blank sheet: {e}")
 
     # ── Stage 4: Progressive color filling ────────────────────────────────────
     filled_canvas = drawing_canvas.copy()

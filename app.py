@@ -318,6 +318,12 @@ async def draw_stream(
                 with zipfile.ZipFile(zip_filepath, 'w') as zipf:
                     if os.path.exists(image_filepath):
                         zipf.write(image_filepath, arcname="final_artwork.png")
+                    
+                    # Package printable paint-by-numbers blank sheet if it exists
+                    blueprint_filepath = os.path.join(OUTPUT_DIR, f"blueprint_{session_id}.png")
+                    if os.path.exists(blueprint_filepath):
+                        zipf.write(blueprint_filepath, arcname="blueprint_sheet.png")
+                        
                     if os.path.exists(video_filepath):
                         zipf.write(video_filepath, arcname="drawing_process.mp4")
                 

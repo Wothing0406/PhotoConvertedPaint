@@ -332,9 +332,13 @@ document.addEventListener("DOMContentLoaded", () => {
                             if (qualityBtn) { qualityBtn.disabled = false; qualityBtn.classList.remove("disabled"); }
 
                             statusBox.classList.add("success");
+                            let successMessage = `Tác phẩm đã được đóng gói thành công. Bạn có thể tải xuống ZIP hoặc nhấn <strong>Kiểm Tra Chất Lượng</strong> để xem điểm số.`;
+                            if (vibeMode && vibeMode.value === "Paint-by-Numbers Blueprint") {
+                                successMessage = `Tác phẩm số hoá đã hoàn thành! File ZIP tải xuống chứa cả file in tranh tô màu trống <strong>blueprint_sheet.png</strong> (đã đánh số phân vùng) và tranh mẫu màu hoàn chỉnh.`;
+                            }
                             statusBox.innerHTML = `🎉 <strong>ĐÃ VẼ XONG TÁC PHẨM!</strong><br><br>
                                 ${explanationText.replace(/\n/g, "<br>")}
-                                Tác phẩm đã được đóng gói thành công. Bạn có thể tải xuống ZIP hoặc nhấn <strong>Kiểm Tra Chất Lượng</strong> để xem điểm số.`;
+                                ${successMessage}`;
                         } else if (payload.length > 20) {
                             // Base64 JPEG frame
                             frameCount++;
