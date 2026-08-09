@@ -168,6 +168,13 @@ def _draw_tapered_line(draw_layer, pts, base_tone, base_width):
         # Tone variation (fades out at both ends)
         tone_val = int(round(255 - (255 - base_tone) * pressure))
         
+        # Smudge halo (lòe chì) simulating real graphite dust spread
+        smudge_w = w * 3.2
+        smudge_alpha = int(round((255 - tone_val) * 0.18))
+        if smudge_alpha > 0:
+            draw_layer.line([pts[i], pts[i+1]], fill=(tone_val, tone_val, tone_val, smudge_alpha), width=int(round(smudge_w)))
+        
+        # Sharp core line
         draw_layer.line([pts[i], pts[i+1]], fill=(tone_val, tone_val, tone_val, 255), width=int(round(w)))
 
 
@@ -261,9 +268,9 @@ def _generate_cross_contour_hatching(gray, saliency_norm, w, h, hatching_intensi
                 L = random.uniform(22, 32)
                 
             if dist >= R:
-                L *= 0.6
-                tone = min(225, tone + 95)
-                lw = 1
+                L *= 0.85
+                tone = min(220, tone + 30)
+                lw = 1 if random.random() > 0.3 else 2
                 
             cos_a = np.cos(angle)
             sin_a = np.sin(angle)

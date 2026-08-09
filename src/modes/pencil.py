@@ -163,6 +163,14 @@ def _draw_tapered_line(draw_layer, pts, base_rgb, base_width):
         g = int(round(255 - (255 - base_rgb[1]) * pressure))
         b = int(round(255 - (255 - base_rgb[2]) * pressure))
         
+        # Colored pencil smudge halo (di chì màu / lòe màu)
+        smudge_w = w * 3.2
+        smudge_alpha = int(round((255 - (r + g + b) / 3.0) * 0.15))
+        if smudge_alpha > 0:
+            # Draw with faded colored stroke
+            draw_layer.line([pts[i], pts[i+1]], fill=(r, g, b, smudge_alpha), width=int(round(smudge_w)))
+            
+        # Core sharp colored stroke
         draw_layer.line([pts[i], pts[i+1]], fill=(r, g, b, 255), width=int(round(w)))
 
 
@@ -258,9 +266,9 @@ def _generate_color_cross_contour_hatching(img_rgb, gray, saliency_norm, w, h, h
                 L = random.uniform(22, 32)
                 
             if dist >= R:
-                L *= 0.6
-                stroke_factor = min(0.95, stroke_factor + 0.35)
-                lw = 1
+                L *= 0.85
+                stroke_factor = min(0.85, stroke_factor + 0.12)
+                lw = 1 if random.random() > 0.3 else 2
                 
             factor = 0.35 + 0.62 * stroke_factor
             stroke_rgb = tuple(max(5, int(c * factor)) for c in c_sampled)
